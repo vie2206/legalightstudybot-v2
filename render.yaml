@@ -1,9 +1,11 @@
 services:
-  - type: worker
-    name: legalightstudybot-docker
+  - type: web
+    name: legalightstudybot-final
     repo: https://github.com/vie2206/legalightstudybot-v2
     dockerfilePath: ./Dockerfile
     plan: free
     envVars:
       - key: BOT_TOKEN
+        sync: false
+      - key: WEBHOOK_URL
         sync: false
