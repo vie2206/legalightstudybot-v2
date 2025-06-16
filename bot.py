@@ -1,52 +1,76 @@
 import os
-from aiohttp import web
+import logging
+import asyncio
+from flask import Flask, request
 from telegram import Update
 from telegram.ext import (
-    Application, CommandHandler, ContextTypes, MessageHandler, filters,
+    Application, CommandHandler, ContextTypes
 )
+from telegram.ext.webhook import WebhookServer
+from aiohttp import web
 
+# Logging for debugging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Telegram Bot Token and Webhook URL
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://legalightstudybot-docker.onrender.com/webhook")
+PORT = int(os.environ.get("PORT", 10000))
 
-# Command Handlers
+# Flask App
+flask_app = Flask(__name__)
+
+# Telegram Application
+telegram_app = Application.builder().token(BOT_TOKEN).build()
+
+
+# === HANDLERS ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 Hello! I'm your Legalight Study Bot.\nWe can do hard things 💪")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🆘 Use /start to begin and /help to get assistance.")
+    await update.message.reply_text("💡 Use /start to begin your journey.\nMore features coming soon!")
 
-async def echo_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔁 You said: " + update.message.text)
-
-# Create the bot application
-telegram_app = Application.builder().token(BOT_TOKEN).build()
+async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"🔁 You said: {update.message.text}")
 
 # Add handlers
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("help", help_command))
-telegram_app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), echo_text))
+telegram_app.add_handler(CommandHandler("hello", echo))
 
-# aiohttp webhook handler
-async def handle_webhook(request):
+
+# === FLASK ROUTES ===
+@flask_app.route('/')
+def home():
+    return "✅ LegalightStudyBot is running."
+
+@flask_app.route('/webhook', methods=['POST'])
+async def webhook():
     try:
-        data = await request.json()
-        update = Update.de_json(data, telegram_app.bot)
+        update = Update.de_json(request.get_json(force=True), telegram_app.bot)
         await telegram_app.process_update(update)
-        return web.Response(text="OK")
     except Exception as e:
-        print(f"❌ Webhook error: {e}")
-        return web.Response(status=500)
+        logger.error("❌ Error in webhook: %s", e)
+    return 'OK'
 
-# aiohttp app setup
-async def on_startup(app):
-    webhook_url = "https://legalightstudybot-docker.onrender.com/webhook"
-    await telegram_app.bot.set_webhook(webhook_url)
-    print(f"🚀 Webhook set to {webhook_url}")
 
-def main():
-    app = web.Application()
-    app.router.add_post("/webhook", handle_webhook)
-    app.on_startup.append(on_startup)
-    web.run_app(app, port=10000)
+# === ENTRY POINT ===
+if __name__ == '__main__':
+    async def main():
+        await telegram_app.initialize()
+        await telegram_app.start()
+        await telegram_app.bot.set_webhook(WEBHOOK_URL)
+        print(f"✅ Webhook set: {WEBHOOK_URL}")
 
-if __name__ == "__main__":
-    main()
+        runner = web.AppRunner(web.WSGIApp(flask_app))
+        await runner.setup()
+        site = web.TCPSite(runner, host='0.0.0.0', port=PORT)
+        await site.start()
+        print(f"🚀 Bot is live at {WEBHOOK_URL}")
+
+        while True:
+            await asyncio.sleep(3600)
+
+    asyncio.run(main())
