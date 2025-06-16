@@ -1,6 +1,6 @@
 services:
-  - type: worker
-    name: legalight-studybot-fi
+  - type: web
+    name: legalightstudybot-web
     env: python
     repo: https://github.com/vie2206/legalightstudybot-v2
     plan: free
@@ -9,3 +9,5 @@ services:
     envVars:
       - key: BOT_TOKEN
         sync: false
+      - key: PORT
+        value: 10000
