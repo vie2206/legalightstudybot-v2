@@ -12,15 +12,15 @@ from telegram.ext import (
 
 # --- Configuration ---
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # without trailing slash
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # e.g., https://legalightstudybot-docker.onrender.com
 
 flask_app = Flask(__name__)
 loop = asyncio.get_event_loop()
 
-# --- Telegram Application Setup ---
+# --- Telegram Bot Setup ---
 telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# --- Command Handlers ---
+# --- Handlers ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     print("📩 /start received")
     if update.message:
@@ -40,7 +40,7 @@ telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("help", help_command))
 telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 
-# --- Webhook Route ---
+# --- Webhook Routes ---
 @flask_app.route("/")
 def home():
     return "✅ LegalightStudyBot is live!"
@@ -51,13 +51,22 @@ def webhook():
         update_json = request.get_json(force=True)
         print(f"📥 Raw Update JSON: {update_json}")
         update = Update.de_json(update_json, telegram_app.bot)
-        loop.create_task(telegram_app.process_update(update))
-        print("✅ Update forwarded to Telegram handlers.")
+
+        async def handle():
+            try:
+                await telegram_app.process_update(update)
+                print("✅ Update processed")
+            except Exception as e:
+                print(f"❌ Error while processing update: {e}")
+
+        loop.create_task(handle())
+
     except Exception as e:
-        print(f"❌ Webhook error: {e}")
+        print(f"❌ Webhook error (outer): {e}")
+
     return "ok"
 
-# --- Bot Startup ---
+# --- Initialization ---
 async def run_bot():
     await telegram_app.initialize()
     await telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
