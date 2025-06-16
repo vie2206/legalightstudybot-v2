@@ -39,7 +39,7 @@ async def countdown(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("⏳ That time is in the past!")
         else:
             await update.message.reply_text(f"🕒 Countdown started to {time_str}!\n*We can do hard things.*", parse_mode="Markdown")
-    except Exception as e:
+    except Exception:
         await update.message.reply_text("Usage: /countdown YYYY-MM-DD HH:MM")
 
 async def announcewinner(update: Update, context: ContextTypes.DEFAULT_TYPE):
