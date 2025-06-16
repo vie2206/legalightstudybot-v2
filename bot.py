@@ -1,53 +1,43 @@
-import os
-import logging
 from flask import Flask, request
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
-from telegram.ext import defaults
+from telegram.ext import Application, CommandHandler, ContextTypes, Defaults
+import os
+import asyncio
 
-# Logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Set your Telegram Bot Token as environment variable or paste directly here
+BOT_TOKEN = os.getenv("BOT_TOKEN")  # Or replace with your token directly as a string
 
-# Bot Token and App Setup
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-PORT = int(os.environ.get("PORT", 10000))
+# Initialize Flask app
 app = Flask(__name__)
 
-# Telegram Application Setup
-telegram_app = Application.builder().token(BOT_TOKEN).build()
+# Initialize Telegram bot app
+telegram_app = Application.builder().token(BOT_TOKEN).defaults(Defaults(parse_mode='HTML')).build()
 
-# --- Command Handlers ---
+# Command: /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 Hello! I'm your Legalight Study Bot.\nWe can do hard things 💪")
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("ℹ️ Use /start to begin. More features coming soon!")
-
-async def hello(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Hello there! Ready to level up your prep?")
-
+# Add command handler
 telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(CommandHandler("help", help_command))
-telegram_app.add_handler(CommandHandler("hello", hello))
 
-# --- Webhook Route ---
-@app.post("/webhook")
+# Root route (for testing if Render is live)
+@app.route('/')
+def home():
+    return '✅ LegalightStudyBot is live!'
+
+# Webhook endpoint
+@app.route('/webhook', methods=['POST'])
 async def webhook():
-    update = Update.de_json(request.get_json(force=True), telegram_app.bot)
+    data = request.get_json(force=True)
+    update = Update.de_json(data, telegram_app.bot)
     await telegram_app.process_update(update)
-    return "OK"
+    return 'ok'
 
-# --- Health Check Route ---
-@app.get("/")
-def index():
-    return "✅ LegalightStudyBot is running."
-
-# --- Run Server ---
-if __name__ == "__main__":
+# Start webhook on Render (port 10000)
+if __name__ == '__main__':
+    port = int(os.environ.get("PORT", 10000))
     telegram_app.run_webhook(
         listen="0.0.0.0",
-        port=PORT,
-        webhook_url=f"https://{os.environ.get('RENDER_EXTERNAL_HOSTNAME')}/webhook",
-        web_app=app
+        port=port,
+        webhook_url="https://legalightstudybot-docker.onrender.com/webhook"
     )
