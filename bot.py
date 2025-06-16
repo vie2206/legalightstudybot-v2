@@ -27,8 +27,8 @@ telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("help", help_command))
 
-# Manual initialization
-asyncio.get_event_loop().run_until_complete(telegram_app.initialize())
+# Initialize the bot (safe for webhook use)
+asyncio.run(telegram_app.initialize())
 
 # --- FLASK ROUTES ---
 @flask_app.route("/")
@@ -38,13 +38,11 @@ def home():
 @flask_app.route("/webhook", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-    asyncio.get_event_loop().create_task(telegram_app.process_update(update))
+    asyncio.run(telegram_app.process_update(update))
     return "ok"
 
-# Set webhook
-asyncio.get_event_loop().run_until_complete(
-    telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
-)
+# Set webhook on startup
+asyncio.run(telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook"))
 
 # --- RUN THE SERVER ---
 if __name__ == "__main__":
