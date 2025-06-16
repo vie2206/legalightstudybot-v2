@@ -1,6 +1,6 @@
 services:
   - type: worker
-    name: legalightstudybot-v2
+    name: legalight-studybot-fi
     env: python
     repo: https://github.com/vie2206/legalightstudybot-v2
     plan: free
