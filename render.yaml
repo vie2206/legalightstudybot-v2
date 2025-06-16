@@ -1,5 +1,5 @@
 services:
-  - type: web
+  - type: worker
     name: legalightstudybot-docker
     repo: https://github.com/vie2206/legalightstudybot-v2
     dockerfilePath: ./Dockerfile
