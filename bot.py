@@ -6,21 +6,20 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
 )
+import asyncio
 
-# Initialize Flask
 app = Flask(__name__)
 
-# Get the bot token from environment variable
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "https://legalightstudybot-docker.onrender.com/webhook")
 
-# Create the Telegram bot application
+# Create the bot application
 telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
 
 # Define command handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 Hello! I'm your Legalight Study Bot.\nWe can do hard things 💪")
 
-# Add handlers to the bot
 telegram_app.add_handler(CommandHandler("start", start))
 
 # Webhook endpoint
@@ -31,19 +30,19 @@ async def webhook():
         await telegram_app.process_update(update)
         return "OK", 200
 
-# Basic home page route
+# Root route
 @app.route("/", methods=["GET"])
 def index():
-    return "🤖 LegalightStudyBot is running."
+    return "✅ LegalightStudyBot is live."
 
-# Set the webhook when the app starts
-@app.before_first_request
-def set_webhook():
-    webhook_url = os.getenv("WEBHOOK_URL", "https://legalightstudybot-docker.onrender.com/webhook")
-    telegram_app.bot.set_webhook(webhook_url)
-    print(f"🚀 Webhook set: {webhook_url}")
+# Set webhook manually once when running
+async def set_webhook_once():
+    await telegram_app.bot.set_webhook(WEBHOOK_URL)
+    print(f"🚀 Webhook set: {WEBHOOK_URL}")
 
-# Run the Flask app
+# Run the bot and flask together
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(set_webhook_once())
     app.run(host="0.0.0.0", port=port)
