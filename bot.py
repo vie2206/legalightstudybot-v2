@@ -1,71 +1,38 @@
 import os
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes,
-)
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
+from flask import Flask, request
 import asyncio
-import datetime
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # Example: https://yourapp.onrender.com
 
-# === Command Handlers ===
+app = Flask(__name__)
 
+# Telegram bot handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 Welcome to LegalightStudyBot!\n\n"
-        "🧠 Use this bot for study timers, countdowns, quiz celebrations, and more.\n"
-        "🎯 Motto: *We can do hard things.*",
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text("👋 Hello! I'm your Legalight Study Bot.\nWe can do hard things 💪")
 
-async def pomodoro(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        minutes = int(context.args[0]) if context.args else 25
-        await update.message.reply_text(f"🍅 Starting Pomodoro for {minutes} minutes!\n*We can do hard things.*", parse_mode="Markdown")
-        await asyncio.sleep(minutes * 60)
-        await update.message.reply_text("✅ Pomodoro complete! Take a break.\n*We can do hard things.*", parse_mode="Markdown")
-    except:
-        await update.message.reply_text("Usage: /pomodoro 25")
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Need help? Try /start or /countdown")
 
-async def countdown(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        time_str = " ".join(context.args)
-        target = datetime.datetime.strptime(time_str, "%Y-%m-%d %H:%M")
-        now = datetime.datetime.now()
-        delta = target - now
-        if delta.total_seconds() <= 0:
-            await update.message.reply_text("⏳ That time is in the past!")
-        else:
-            await update.message.reply_text(f"🕒 Countdown started to {time_str}!\n*We can do hard things.*", parse_mode="Markdown")
-    except Exception:
-        await update.message.reply_text("Usage: /countdown YYYY-MM-DD HH:MM")
+# Add more commands as needed
 
-async def announcewinner(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id in [123456789]:  # Replace with your Telegram user ID
-        if context.args:
-            winner = context.args[0]
-            await update.message.reply_text(
-                f"🎉 Congrats {winner}! You nailed the quiz! 💯\n"
-                "🏆 You’re today’s winner!\n"
-                "*We can do hard things.*\n"
-                "🎊🎊🎊",
-                parse_mode="Markdown"
-            )
-        else:
-            await update.message.reply_text("Usage: /announcewinner @username")
-    else:
-        await update.message.reply_text("❌ You are not authorized to announce winners.")
+# Telegram application setup
+telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CommandHandler("help", help_command))
 
-# === Bot Setup ===
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    update = Update.de_json(request.get_json(force=True), telegram_app.bot)
+    asyncio.run(telegram_app.process_update(update))
+    return "ok"
 
-app = ApplicationBuilder().token(BOT_TOKEN).build()
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("pomodoro", pomodoro))
-app.add_handler(CommandHandler("countdown", countdown))
-app.add_handler(CommandHandler("announcewinner", announcewinner))
+@app.route("/")
+def home():
+    return "Legalight Bot Running - Webhook Mode ✅"
 
-if __name__ == "__main__":
-    print("🤖 Bot is starting... Listening for commands.")
-    app.run_polling()
+if __name__ == '__main__':
+    telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
