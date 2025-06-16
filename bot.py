@@ -1,42 +1,50 @@
 import os
-import logging
 from flask import Flask, request
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, ContextTypes
+)
 
-# Logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Setup
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # e.g., https://yourapp.onrender.com
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g., https://your-app.onrender.com
 
 app = Flask(__name__)
-telegram_app = Application.builder().token(BOT_TOKEN).build()
 
-# Command handler
+telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+
+# Handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 Hello! I'm your Legalight Study Bot.\nWe can do hard things 💪")
 
-telegram_app.add_handler(CommandHandler("start", start))
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Here to help! 📚 Try /start or send a message.")
 
-# Webhook route
-@app.post("/webhook")
-async def webhook():
-    data = request.get_json(force=True)
-    update = Update.de_json(data, telegram_app.bot)
-    await telegram_app.process_update(update)
-    return "OK"
+telegram_app.add_handler(CommandHandler("start", start))
+telegram_app.add_handler(CommandHandler("help", help_command))
+
 
 @app.route("/", methods=["GET"])
-def home():
+def index():
     return "LegalightStudyBot is running!"
 
-@app.before_first_request
-def init_webhook():
-    telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
-    print("✅ Webhook set successfully.")
+
+@app.route("/webhook", methods=["POST"])
+async def webhook():
+    if request.method == "POST":
+        update = Update.de_json(request.get_json(force=True), telegram_app.bot)
+        await telegram_app.process_update(update)
+        return "ok"
+
 
 if __name__ == "__main__":
+    # Set webhook
+    import asyncio
+    async def setup():
+        await telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
+        print("✅ Webhook set!")
+
+    asyncio.run(setup())
+
+    # Start Flask app
     app.run(host="0.0.0.0", port=10000)
