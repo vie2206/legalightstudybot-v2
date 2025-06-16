@@ -1,0 +1,12 @@
+
+services:
+  - type: worker
+    name: legalightstudybot-v2
+    env: python
+    repo: https://github.com/yourusername/legalightstudybot-v2
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python bot.py"
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
