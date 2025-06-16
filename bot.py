@@ -1,46 +1,56 @@
 import os
-import telegram
 from flask import Flask, request
-from telegram.ext import ApplicationBuilder, CommandHandler
-from dotenv import load_dotenv
+from telegram import Update
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    filters,
+)
 
-load_dotenv()
-
+# Load environment variables (optional)
 TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. "https://legalightstudybot-docker.onrender.com"
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g., https://yourdomain.com
 
-telegram_app = ApplicationBuilder().token(TOKEN).build()
+telegram_app = Application.builder().token(TOKEN).build()
 
-# --- Handlers ---
-async def start(update, context):
+# Handlers
+async def start(update: Update, context):
     await update.message.reply_text("👋 Hello! I'm your Legalight Study Bot.\nWe can do hard things 💪")
 
-async def help_command(update, context):
-    await update.message.reply_text("⚙️ Type /start to begin.\nMore features coming soon!")
+async def help_command(update: Update, context):
+    await update.message.reply_text("Here's how I can help you...")
+
+async def echo(update: Update, context):
+    await update.message.reply_text(update.message.text)
 
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("help", help_command))
+telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 
-# --- Flask App ---
+# Flask App
 app = Flask(__name__)
 
-@app.route("/")
-def home():
-    return "Legalight Study Bot is live."
+@app.route("/", methods=["GET"])
+def index():
+    return "✅ LegalightStudyBot is running!"
 
-@app.route('/webhook', methods=["POST"])
+@app.route("/webhook", methods=["POST"])
 async def webhook():
-    if request.method == "POST":
-        update = telegram.Update.de_json(request.get_json(force=True), telegram_app.bot)
-        await telegram_app.initialize()  # ✅ IMPORTANT FIX
+    try:
+        data = request.get_json(force=True)
+        update = Update.de_json(data, telegram_app.bot)
         await telegram_app.process_update(update)
-        return "ok"
+    except Exception as e:
+        print(f"Error: {e}")
+        return "Something went wrong", 500
+    return "ok"
 
-# --- Set webhook on startup ---
-async def set_webhook():
-    await telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
-
+# Run webhook
 if __name__ == "__main__":
-    import asyncio
-    asyncio.run(set_webhook())
-    app.run(host="0.0.0.0", port=10000)
+    telegram_app.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.environ.get("PORT", 10000)),
+        webhook_url=f"{WEBHOOK_URL}/webhook",
+        app=app
+    )
