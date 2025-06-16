@@ -8,29 +8,29 @@ from telegram.ext import (
     ContextTypes
 )
 
-# --- ENVIRONMENT VARIABLES ---
+# ENV VARIABLES
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # eg. https://legalightstudybot-docker.onrender.com
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL")  # e.g., https://legalightstudybot-docker.onrender.com
 
-# --- FLASK APP SETUP ---
+# Initialize Flask
 flask_app = Flask(__name__)
 
-# --- TELEGRAM HANDLERS ---
+# Telegram handlers
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 Hello! I'm your Legalight Study Bot.\nWe can do hard things 💪")
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🛟 Need help? Try /start or stay tuned for more features.")
 
-# --- TELEGRAM APP INITIALIZATION ---
+# Build the Telegram application
 telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
 telegram_app.add_handler(CommandHandler("start", start))
 telegram_app.add_handler(CommandHandler("help", help_command))
 
-# Initialize the bot (safe for webhook use)
-asyncio.run(telegram_app.initialize())
+# Shared event loop
+loop = asyncio.get_event_loop()
 
-# --- FLASK ROUTES ---
+# Flask routes
 @flask_app.route("/")
 def home():
     return "Legalight StudyBot is alive ✨"
@@ -38,12 +38,15 @@ def home():
 @flask_app.route("/webhook", methods=["POST"])
 def webhook():
     update = Update.de_json(request.get_json(force=True), telegram_app.bot)
-    asyncio.run(telegram_app.process_update(update))
+    loop.create_task(telegram_app.process_update(update))
     return "ok"
 
-# Set webhook on startup
-asyncio.run(telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook"))
+# Startup logic
+async def on_startup():
+    await telegram_app.initialize()
+    await telegram_app.bot.set_webhook(url=f"{WEBHOOK_URL}/webhook")
 
-# --- RUN THE SERVER ---
+# Run everything
 if __name__ == "__main__":
+    loop.run_until_complete(on_startup())
     flask_app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
