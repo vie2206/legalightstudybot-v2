@@ -1,12 +1,9 @@
 services:
   - type: web
-    name: legalightstudybot-cleanfinal
-    env: python
-    pythonVersion: 3.10           # ✅ FORCE Python 3.10
+    name: legalightstudybot-docker
     repo: https://github.com/vie2206/legalightstudybot-v2
+    dockerfilePath: ./Dockerfile
     plan: free
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "python bot.py"
     envVars:
       - key: BOT_TOKEN
         sync: false
