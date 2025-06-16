@@ -1,3 +1,2 @@
-python-telegram-bot[flask]==21.1
-Flask[async]==2.3.3
-python-dotenv
+Flask[async]>=2.0  
+python-telegram-bot~=20.7  
