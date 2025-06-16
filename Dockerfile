@@ -1,13 +1,14 @@
-# Dockerfile
 FROM python:3.10-slim
 
 WORKDIR /app
 
 COPY requirements.txt requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --upgrade pip
+RUN pip install -r requirements.txt
+
+# 💥 Add this line manually
+RUN pip install Flask
 
 COPY . .
-
-EXPOSE 10000
 
 CMD ["python", "bot.py"]
