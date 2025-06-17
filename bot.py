@@ -1,110 +1,100 @@
 # bot.py
-
 import os
-import logging
 import asyncio
+from dotenv import load_dotenv
 
-from telegram import BotCommand, Update
+from flask import Flask, request, abort
+from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
-    ContextTypes,
     filters,
+    ContextTypes,
 )
 
+# import your feature modules
 import timer
 import countdown
-import streak
-from dotenv import load_dotenv
-from database import init_db
+import quiz
 
-# ─── Load env & configure logging ───────────────────────────────────────────────
+# load .env (BOT_TOKEN, WEBHOOK_URL)
 load_dotenv()
-TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # must include the '/webhook' path
-PORT = int(os.getenv("PORT", "10000"))
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+if not BOT_TOKEN:
+    raise RuntimeError("Missing BOT_TOKEN environment variable")
 
-if not TOKEN or not WEBHOOK_URL:
-    raise RuntimeError("BOT_TOKEN and WEBHOOK_URL must be set in your environment")
+# ─── Flask app ──────────────────────────────────────────────────────────────
+flask_app = Flask(__name__)
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# ─── Telegram Application ────────────────────────────────────────────────────
+app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-# ─── Core handlers ──────────────────────────────────────────────────────────────
+# ─── Core Handlers ───────────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Welcome to LegalightStudyBot!\n"
-        "Use /help to see available commands."
+        "Use /help to see all available commands."
     )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_markdown(
-        "📚 *Commands:*\n"
-        "/start — Restart the bot\n"
-        "/help  — Show this message\n\n"
-        "⏲️ *Pomodoro Timer* (/timer …)\n"
-        "📅 *Countdown* (/countdown …)\n"
-        "/checkin — Record today’s study check-in\n"
-        "/mystreak — View your current streak\n"
-        "/study_remind … — Manage study reminders\n"
-        "/quiz_start … — Launch a QuizBot quiz\n"
-        "/quiz_winner — Announce quiz winners\n"
+    await update.message.reply_text(
+        "📚 *Commands*:\n"
+        "/start — Restart bot\n"
+        "/help — This message\n\n"
+        "⏲️ Timer:\n"
+        "/timer `<name> <work_mins> <break_mins>`\n"
+        "/timer_status\n"
+        "/timer_stop\n\n"
+        "📅 Countdown:\n"
+        "/countdown `<YYYY-MM-DD> [HH:MM:SS] <label>`\n"
+        "/countdown_status\n"
+        "/countdown_stop\n\n"
+        "🎉 Quiz & Winners:\n"
+        "/quiz_start `<topic>`\n"
+        "/quiz_winner\n\n"
+        "🔥 Streaks, 🎖️ Badges, 📊 Summaries, ⏰ Reminders, 🤗 Motivation, etc.",
+        parse_mode="Markdown",
+        disable_web_page_preview=True,
     )
 
-async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # catches *any* unknown /command
     await update.message.reply_text("❓ Unknown command. Try /help.")
 
-# ─── Main application setup & webhook launch ──────────────────────────────────
-async def main():
-    # 1) Build the Application
-    app = ApplicationBuilder().token(TOKEN).build()
+# register core
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("help", help_cmd))
+app.add_handler(MessageHandler(filters.COMMAND, fallback))
 
-    # 2) Register core handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help",  help_cmd))
+# ─── Feature Modules ─────────────────────────────────────────────────────────
+# each of these files (timer.py, countdown.py, quiz.py) must define:
+#     def register_handlers(app: Application): ...
+timer.register_handlers(app)
+countdown.register_handlers(app)
+quiz.register_handlers(app)
 
-    # 3) Register feature modules
-    timer.register_handlers(app)
-    countdown.register_handlers(app)
-    streak.register_handlers(app)
+# ─── Webhook Endpoint ────────────────────────────────────────────────────────
+@flask_app.route("/webhook", methods=["POST"])
+def telegram_webhook():
+    """Receives updates from Telegram and dispatches to PTB."""
+    data = request.get_json(force=True)
+    if not data:
+        return "no data", 400
+    update = Update.de_json(data, app.bot)
+    # we spin up a fresh event loop per update
+    asyncio.run(app.process_update(update))
+    return "OK"
 
-    # 4) Fallback for any other /command
-    app.add_handler(MessageHandler(filters.COMMAND, unknown))
+# health-check
+@flask_app.route("/", methods=["GET"])
+def health_check():
+    return "LegalightStudyBot is running!"
 
-    # 5) Initialize & start
-    await app.initialize()
-    await app.start()
-
-    # 6) Set the Telegram slash‐commands menu
-    commands = [
-        BotCommand("start", "Restart the bot"),
-        BotCommand("help",  "Show help message"),
-        BotCommand("timer", "Start a Pomodoro session"),
-        BotCommand("countdown", "Start a live countdown"),
-        BotCommand("checkin", "Record today's check-in"),
-        BotCommand("mystreak", "Show your study streak"),
-        BotCommand("streak_alerts", "Toggle streak break alerts"),
-        BotCommand("study_remind", "Manage study reminders"),
-        BotCommand("quiz_start", "Launch a QuizBot quiz"),
-        BotCommand("quiz_winner", "Announce quiz winners"),
-    ]
-    await app.bot.set_my_commands(commands)
-    logger.info("✅ Commands registered")
-
-    # 7) Launch webhook listener and set the webhook URL
-    await app.updater.start_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        url_path="webhook",
-        webhook_url=WEBHOOK_URL,
-    )
-    logger.info(f"✅ Webhook set to {WEBHOOK_URL}")
-
-    # 8) Idle until termination
-    await app.updater.idle()
-
+# ─── Entrypoint ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # Ensure our database tables exist
-    init_db()
-    asyncio.run(main())
+    # You can optionally set your webhook here via Telegram API,
+    # or set it manually with:
+    #   curl -F "url=https://<your-url>/webhook" https://api.telegram.org/bot<token>/setWebhook
+    port = int(os.environ.get("PORT", 10000))
+    flask_app.run(host="0.0.0.0", port=port)
