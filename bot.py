@@ -11,13 +11,13 @@ from telegram.ext import (
     filters,
 )
 
-import countdown    # our countdown module
+import countdown
+import timer        # ← your pomodoro module
 from dotenv import load_dotenv
 
-# ——— Load env & logging ———
 load_dotenv()
 TOKEN       = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")   # e.g. https://yourapp.onrender.com
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 PORT        = int(os.getenv("PORT", "10000"))
 
 if not TOKEN or not WEBHOOK_URL:
@@ -26,50 +26,52 @@ if not TOKEN or not WEBHOOK_URL:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ——— Core handlers ———
+# — core handlers —
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Welcome to LegalightStudyBot!\n"
-        "Use /help to see available commands."
+        "👋 Welcome to LegalightStudyBot!\nUse /help to see commands."
     )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_markdown(
         "📚 *Commands:*\n"
         "/start — Restart bot\n"
-        "/help — This message\n\n"
-        "*Countdown*\n"
-        "/countdown `<YYYY-MM-DD>` `[HH:MM:SS]` `<label>` `[--pin]`\n"
-        "    Start a live countdown\n"
-        "/countdown_status — Show remaining once\n"
-        "/countdown_stop — Cancel live countdown\n"
+        "/help  — This message\n\n"
+        "⏲️ *Pomodoro* (/timer …)\n"
+        "📅 *Countdown* (/countdown …)\n"
+        # add more here as you build them
     )
 
 async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "❓ Unknown command. Try /help."
-    )
+    await update.message.reply_text("❓ Sorry, I didn't understand that. Try /help.")
 
-# ——— Main ———
 async def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # core
-    app.add_handler(CommandHandler("start",       start))
-    app.add_handler(CommandHandler("help",        help_cmd))
-    app.add_handler(MessageHandler(filters.COMMAND, fallback))
+    # 1️⃣ Register feature handlers FIRST
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help",  help_cmd))
 
-    # countdown module
+    # Pomodoro timers
+    timer.register_handlers(app)
+
+    # Countdown
     countdown.register_handlers(app)
+
+    # 2️⃣ Then register the catch-all fallback
+    app.add_handler(MessageHandler(filters.COMMAND, fallback))
 
     # initialize + start
     await app.initialize()
     await app.start()
 
-    # set slash-commands
+    # set the menu in Telegram UI
     cmds = [
         BotCommand("start",            "Restart the bot"),
         BotCommand("help",             "Show help"),
+        BotCommand("timer",            "Start a Pomodoro"),
+        BotCommand("timer_status",     "Check Pomodoro"),
+        BotCommand("timer_stop",       "Stop Pomodoro"),
         BotCommand("countdown",        "Start live countdown"),
         BotCommand("countdown_status", "Show remaining once"),
         BotCommand("countdown_stop",   "Cancel countdown"),
