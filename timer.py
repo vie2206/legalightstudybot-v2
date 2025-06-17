@@ -1,68 +1,145 @@
-# bot.py
-import os
-import logging
 import asyncio
+import time
+from typing import Dict
 
-from telegram import BotCommand, Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes,
-)
+from telegram import Update
+from telegram.ext import ContextTypes, CommandHandler
 
-import timer  # our Pomodoro module; later you’ll import countdown, quiz, etc.
+# In‐memory storage for active timers and metadata
+active_timers: Dict[int, asyncio.Task] = {}
+timer_info: Dict[int, Dict[str, float]] = {}
 
-from dotenv import load_dotenv
+async def timer_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /timer [work_min] [break_min]
+    Starts a Pomodoro with an in‐place live countdown.
+    """
+    chat_id = update.effective_chat.id
+    args = context.args or []
 
-load_dotenv()
+    # Parse durations (defaults: 25 work / 5 break)
+    try:
+        work = int(args[0]) if len(args) >= 1 else 25
+        brk  = int(args[1]) if len(args) >= 2 else 5
+    except ValueError:
+        return await update.message.reply_text(
+            "❌ Usage: /timer [work_minutes] [break_minutes]"
+        )
 
-TOKEN       = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. "https://yourapp.onrender.com/webhook"
-PORT        = int(os.getenv("PORT", "10000"))
+    # Cancel any existing timer
+    if chat_id in active_timers:
+        active_timers[chat_id].cancel()
 
-if not TOKEN or not WEBHOOK_URL:
-    raise RuntimeError("BOT_TOKEN and WEBHOOK_URL must be set in environment")
+    # Work phase metadata
+    timer_info[chat_id] = {"phase": "work", "start": time.time(), "duration": work * 60}
 
-# ——— Setup logging ——————————————————————————————————
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# ——— Build the bot application —————————————————————
-app = ApplicationBuilder().token(TOKEN).build()
-
-# ——— Register feature modules —————————————————————
-timer.register_handlers(app)
-# later, when you have countdown.py:
-# countdown.register_handlers(app)
-# quiz.register_handlers(app)
-# …and so on.
-
-# ——— Register slash-commands with Telegram ———————————
-async def set_commands():
-    cmds = [
-        BotCommand("timer", "Start/cancel/check Pomodoro (/timer [work] [break])"),
-        BotCommand("timer_stop", "Cancel the Pomodoro"),
-        BotCommand("timer_status", "Show remaining time"),
-        # add your other commands as you build them...
-    ]
-    await app.bot.set_my_commands(cmds)
-    logger.info("✅ Registered slash-commands")
-
-# ——— Bootstrap: set commands & webhook ——————————————
-async def bootstrap():
-    await set_commands()
-    await app.bot.set_webhook(WEBHOOK_URL)
-    logger.info(f"✅ Webhook set to {WEBHOOK_URL}")
-
-# Run our bootstrap on the single event loop, then hand off to PTB’s webhook server
-if __name__ == "__main__":
-    # 1) initialize commands + webhook
-    asyncio.run(bootstrap())
-
-    # 2) start listening for Telegram on /webhook
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=PORT,
-        webhook_path="/webhook",
-        webhook_url=WEBHOOK_URL
+    # Send initial countdown message
+    countdown_msg = await context.bot.send_message(
+        chat_id,
+        f"🟢 Work phase: {work}m 0s remaining."
     )
+
+    async def run_pomodoro():
+        try:
+            # Work countdown loop
+            end_time = time.time() + work * 60
+            while True:
+                remain = end_time - time.time()
+                if remain <= 0:
+                    break
+                m, s = divmod(int(remain), 60)
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=countdown_msg.message_id,
+                        text=f"🟢 Work phase: {m}m {s}s remaining."
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(5)
+
+            # Transition to break
+            await context.bot.delete_message(chat_id, countdown_msg.message_id)
+            await context.bot.send_message(
+                chat_id,
+                f"⏰ Work session over! Time for a {brk}-min break."
+            )
+
+            # Break phase metadata
+            timer_info[chat_id] = {"phase": "break", "start": time.time(), "duration": brk * 60}
+            break_msg = await context.bot.send_message(
+                chat_id,
+                f"🔵 Break phase: {brk}m 0s remaining."
+            )
+            end_break = time.time() + brk * 60
+
+            # Break countdown loop
+            while True:
+                remain2 = end_break - time.time()
+                if remain2 <= 0:
+                    break
+                m2, s2 = divmod(int(remain2), 60)
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id=chat_id,
+                        message_id=break_msg.message_id,
+                        text=f"🔵 Break phase: {m2}m {s2}s remaining."
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(5)
+
+            # Finish
+            await context.bot.delete_message(chat_id, break_msg.message_id)
+            await context.bot.send_message(
+                chat_id,
+                "✅ Break’s over! Ready for the next session? Use /timer again."
+            )
+
+        except asyncio.CancelledError:
+            # Clean up countdown message if canceled mid‐phase
+            try:
+                await context.bot.delete_message(chat_id, countdown_msg.message_id)
+            except Exception:
+                pass
+        finally:
+            active_timers.pop(chat_id, None)
+            timer_info.pop(chat_id, None)
+
+    # Kick off the background task
+    task = asyncio.create_task(run_pomodoro())
+    active_timers[chat_id] = task
+
+    await update.message.reply_text(
+        f"🟢 Pomodoro started: {work} min work → {brk} min break."
+    )
+
+async def timer_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Stops and cancels the active Pomodoro timer."""
+    chat_id = update.effective_chat.id
+    task = active_timers.pop(chat_id, None)
+    timer_info.pop(chat_id, None)
+    if task:
+        task.cancel()
+        await update.message.reply_text("🚫 Pomodoro canceled.")
+    else:
+        await update.message.reply_text("ℹ️ No active Pomodoro to cancel.")
+
+async def timer_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Reports remaining time for the active Pomodoro phase."""
+    chat_id = update.effective_chat.id
+    info = timer_info.get(chat_id)
+    if not info:
+        return await update.message.reply_text("ℹ️ No active Pomodoro.")
+
+    elapsed = time.time() - info["start"]
+    remain  = max(0, info["duration"] - elapsed)
+    m, s     = divmod(int(remain), 60)
+    phase    = info.get("phase", "work").capitalize()
+    await update.message.reply_text(f"⏱️ {phase} phase: {m}m {s}s remaining.")
+
+def register_handlers(app):
+    """Wire up timer commands onto your Application."""
+    app.add_handler(CommandHandler("timer", timer_start))
+    app.add_handler(CommandHandler("timer_stop", timer_stop))
+    app.add_handler(CommandHandler("timer_status", timer_status))
