@@ -1,69 +1,80 @@
 import asyncio
 from datetime import datetime, timedelta
-from typing import Dict, Optional
+from typing import Dict
 
 from telegram import Update
 from telegram.ext import ContextTypes, CommandHandler
 
-# In-memory
+# In‐memory stores for active countdowns
 active_tasks: Dict[int, asyncio.Task] = {}
-info_store:  Dict[int, Dict]         = {}
+info_store:   Dict[int, Dict]         = {}
 
+# Date/time formats
 DATE_FMT = "%Y-%m-%d"
 TIME_FMT = "%H:%M:%S"
+
 
 async def countdown_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     args    = context.args or []
 
-    # parse --pin
+    # pin flag?
     pin = False
     if "--pin" in args:
         pin = True
         args.remove("--pin")
 
+    # need at least date + label
     if len(args) < 2:
         return await update.message.reply_text(
             "❌ Usage: /countdown <YYYY-MM-DD> [HH:MM:SS] <label> [--pin]"
         )
 
-    # date
-    date_str = args[0]
+    # parse date
     try:
-        base_date = datetime.strptime(date_str, DATE_FMT)
+        base = datetime.strptime(args[0], DATE_FMT)
     except ValueError:
         return await update.message.reply_text("❌ Date must be YYYY-MM-DD")
 
-    # optional time
+    # parse optional time
     if ":" in args[1]:
-        time_str   = args[1]
-        label_parts = args[2:]
         try:
-            t = datetime.strptime(time_str, TIME_FMT).time()
-            target = datetime.combine(base_date.date(), t)
+            t = datetime.strptime(args[1], TIME_FMT).time()
+            target = datetime.combine(base.date(), t)
+            label  = " ".join(args[2:]).strip() or "Event"
         except ValueError:
             return await update.message.reply_text("❌ Time must be HH:MM:SS")
     else:
-        target      = datetime.combine(base_date.date(), datetime.min.time())
-        label_parts = args[1:]
+        target = datetime.combine(base.date(), datetime.min.time())
+        label  = " ".join(args[1:]).strip() or "Event"
 
-    label = " ".join(label_parts).strip() or "Event"
-
-    # cancel existing
+    # cancel any existing countdown in this chat
     if chat_id in active_tasks:
         active_tasks[chat_id].cancel()
 
+    # store meta
     info_store[chat_id] = {
         "target": target,
         "label":  label,
-        "msg_id": None,
         "pin":    pin,
+        "msg_id": None,
     }
 
-    await update.message.reply_text(
+    # 1️⃣ Immediate acknowledgement (becomes our live ticker)
+    msg = await update.message.reply_text(
         f"⏳ Countdown to '{label}' at {target:%Y-%m-%d %H:%M:%S} started."
     )
+    if pin:
+        try:
+            await context.bot.pin_chat_message(chat_id, msg.message_id)
+        except:
+            pass
+
+    info_store[chat_id]["msg_id"] = msg.message_id
+
+    # fire off the per-second ticker
     active_tasks[chat_id] = asyncio.create_task(_ticker(chat_id, context))
+
 
 async def countdown_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
@@ -74,54 +85,53 @@ async def countdown_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     remain = info["target"] - datetime.now()
     if remain <= timedelta(0):
         return await update.message.reply_text(f"🎉 '{info['label']}' is now!")
+
     d = remain.days
     h, rem = divmod(remain.seconds, 3600)
-    m, s    = divmod(rem, 60)
+    m, s   = divmod(rem, 60)
     await update.message.reply_text(
         f"📅 {d}d {h:02d}h {m:02d}m {s:02d}s until '{info['label']}'."
     )
 
+
 async def countdown_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     task    = active_tasks.pop(chat_id, None)
-    info    = info_store.pop(chat_id, None)
+    info_store.pop(chat_id, None)
     if task:
         task.cancel()
         return await update.message.reply_text("🛑 Countdown canceled.")
-    await update.message.reply_text("ℹ️ No active countdown to stop.")
+    return await update.message.reply_text("ℹ️ No active countdown to stop.")
+
 
 async def _ticker(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    info = info_store.get(chat_id)
-    if not info:
-        return
-
+    info   = info_store.get(chat_id)
+    msg_id = info["msg_id"]
     try:
-        msg = await context.bot.send_message(chat_id, "⏳ Starting…")
-        if info["pin"]:
-            try:
-                await context.bot.pin_chat_message(chat_id, msg.message_id)
-            except:
-                pass
-        info["msg_id"] = msg.message_id
-
         while True:
             remain = info["target"] - datetime.now()
             if remain <= timedelta(0):
+                # 3️⃣ Final edit
                 await context.bot.edit_message_text(
                     chat_id=chat_id,
-                    message_id=msg.message_id,
+                    message_id=msg_id,
                     text=f"🎉 '{info['label']}' is now!"
+                )
+                # 3️⃣ Broadcast celebration
+                await context.bot.send_message(
+                    chat_id,
+                    f"🎉 '{info['label']}' has arrived! 🎊"
                 )
                 break
 
             d = remain.days
             h, rem = divmod(remain.seconds, 3600)
-            m, s    = divmod(rem, 60)
+            m, s   = divmod(rem, 60)
             text = f"📅 {d}d {h:02d}h {m:02d}m {s:02d}s until '{info['label']}'."
             try:
                 await context.bot.edit_message_text(
                     chat_id=chat_id,
-                    message_id=msg.message_id,
+                    message_id=msg_id,
                     text=text
                 )
             except:
@@ -130,10 +140,12 @@ async def _ticker(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
             await asyncio.sleep(1)
 
     except asyncio.CancelledError:
+        # user hit /countdown_stop
         pass
     finally:
         info_store.pop(chat_id, None)
         active_tasks.pop(chat_id, None)
+
 
 def register_handlers(app):
     app.add_handler(CommandHandler("countdown",        countdown_start))
