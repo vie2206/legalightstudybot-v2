@@ -1,5 +1,6 @@
 import os
 import logging
+import asyncio
 
 from telegram import BotCommand, Update
 from telegram.ext import (
@@ -14,19 +15,19 @@ import timer
 import countdown
 from dotenv import load_dotenv
 
-# ─── Load environment & configure logging ───────────────────────────────────────
+# ─── Load env & configure logging ───────────────────────────────────────────────
 load_dotenv()
 TOKEN       = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")    # e.g. https://yourapp.onrender.com
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://yourapp.onrender.com
 PORT        = int(os.getenv("PORT", "10000"))
 
 if not TOKEN or not WEBHOOK_URL:
-    raise RuntimeError("BOT_TOKEN and WEBHOOK_URL must be set in environment")
+    raise RuntimeError("BOT_TOKEN and WEBHOOK_URL must be set in your environment")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ─── Core command handlers ──────────────────────────────────────────────────────
+# ─── Core handlers ──────────────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Welcome to LegalightStudyBot!\n"
@@ -36,55 +37,63 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_markdown(
         "📚 *Commands:*\n"
-        "/start — Restart bot\n"
-        "/help  — Show this help message\n\n"
-        "⏲️ *Pomodoro Timer* (/timer …)\n"
+        "/start — Restart the bot\n"
+        "/help  — Show this message\n\n"
+        "⏲️ *Pomodoro* (/timer …)\n"
         "📅 *Countdown* (/countdown …)\n"
     )
 
-async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "❓ Unknown command. Try /help."
-    )
+async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❓ Unknown command. Try /help.")
 
-# ─── Application setup & webhook launch ────────────────────────────────────────
-def main():
-    # Build the application
+
+# ─── Main application setup & webhook launch ──────────────────────────────────
+async def main():
+    # 1) Build the Application
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # Register core handlers
+    # 2) Register core handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help",  help_cmd))
 
-    # Register your feature modules
+    # 3) Register your feature modules *before* fallback
     timer.register_handlers(app)
     countdown.register_handlers(app)
 
-    # Catch-all for any other /command
-    app.add_handler(MessageHandler(filters.COMMAND, fallback))
+    # 4) Fallback for any other /command
+    app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
-    # Configure the Telegram menu of slash commands
-    app.bot.set_my_commands([
+    # 5) Initialize & start
+    await app.initialize()
+    await app.start()
+
+    # 6) Set the Telegram “slash-command” menu (must be awaited)
+    commands = [
         BotCommand("start",            "Restart the bot"),
         BotCommand("help",             "Show help message"),
         BotCommand("timer",            "Start a Pomodoro session"),
+        BotCommand("timer_status",     "Show remaining time"),
         BotCommand("timer_pause",      "Pause session"),
         BotCommand("timer_resume",     "Resume session"),
-        BotCommand("timer_status",     "Show remaining time"),
         BotCommand("timer_stop",       "Cancel session"),
         BotCommand("countdown",        "Start live countdown"),
         BotCommand("countdown_status", "Show remaining once"),
         BotCommand("countdown_stop",   "Cancel live countdown"),
-    ])
+    ]
+    await app.bot.set_my_commands(commands)
     logger.info("✅ Commands registered")
 
-    # Start the built-in webhook server (no Flask)
-    app.run_webhook(
+    # 7) Launch webhook listener and set the webhook URL
+    await app.updater.start_webhook(
         listen="0.0.0.0",
         port=PORT,
         url_path="webhook",
         webhook_url=f"{WEBHOOK_URL}/webhook",
     )
+    logger.info(f"✅ Webhook set to {WEBHOOK_URL}/webhook")
+
+    # 8) Idle until Ctrl-C or termination
+    await app.updater.idle()
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
