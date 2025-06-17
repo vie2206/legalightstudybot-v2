@@ -1,4 +1,5 @@
 # bot.py
+
 import os
 import logging
 from dotenv import load_dotenv
@@ -11,17 +12,19 @@ from telegram.ext import (
 )
 
 import timer        # your Pomodoro module
-import countdown    # your countdown module
-import quiz         # your QuizBot-wrapper module
+import countdown    # your Countdown module
+import quiz         # your Quiz stub/module
 
+# — Load environment —
 load_dotenv()
 TOKEN       = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://your-app.onrender.com
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://legalightstudybot-docker.onrender.com
 
+# — Logging —
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ——— Core commands ———
+# — Core command handlers —
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Welcome to LegalightStudyBot!\n"
@@ -34,35 +37,42 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/start — Restart bot\n"
         "/help — This message\n\n"
         "⏲️ Pomodoro: /timer <name> <work_min> <break_min>\n"
-        "⏳ Countdown: /countdown YYYY-MM-DD [HH:MM:SS] <label> [--pin]\n"
-        "🎉 Quiz: /quiz_start [topic]  /quiz_winner\n"
-        # … extend as you add modules …
+        "⏳ Countdown: /countdown YYYY-MM-DD [HH:MM:SS] <label>\n"
+        "🎉 Quiz: /quiz_start [topic]    /quiz_winner\n"
+        # … extend here as you add more modules …
     )
 
 def register_handlers(app: Application):
+    # core
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
+    # feature modules
     timer.register_handlers(app)
     countdown.register_handlers(app)
     quiz.register_handlers(app)
 
 def main():
-    # Build
+    # Build application
     app = Application.builder().token(TOKEN).build()
     register_handlers(app)
 
-    # Launch built-in webhook server (PTB 20.7 signature)
+    # Webhook settings
     port     = int(os.environ.get("PORT", 10000))
-    path     = "/webhook"                             # must match Telegram’s URL path
-    full_url = f"{WEBHOOK_URL}{path}"                 # e.g. https://.../webhook
+    path     = "/webhook"                       # this is the URL path we’ll listen on
+    full_url = f"{WEBHOOK_URL}{path}"           # e.g. https://.../webhook
 
-    logger.info("Starting webhook on port %d with path %r → %s", port, path, full_url)
+    logger.info(
+        "Starting PTB webhook server on port %d, path %r → %s",
+        port, path, full_url
+    )
+
+    # run_webhook signature for PTB v20.7
     app.run_webhook(
         listen="0.0.0.0",
         port=port,
-        url_path=path,            # <— not webhook_path
-        webhook_url=full_url,     # PTB will call set_webhook under the hood
-        drop_pending_updates=True # optional: avoid old updates
+        url_path=path,          # the path Telegram posts to
+        webhook_url=full_url,   # PTB will set this URL for you
+        drop_pending_updates=True
     )
 
 if __name__ == "__main__":
