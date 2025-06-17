@@ -1,23 +1,29 @@
-# bot.py
+# bot.py  – Legalight Study Bot (command-menu fix)
 import logging, os, asyncio
+from functools import partial
 from dotenv import load_dotenv
-from telegram import BotCommand
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
+from telegram import BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    filters,
+)
 
 import database, timer, countdown, streak, study_tasks
 
+# ─── env / logging ───────────────────────────────────────────────
 load_dotenv()
 BOT_TOKEN    = os.getenv("BOT_TOKEN")
-WEBHOOK_ROOT = os.getenv("WEBHOOK_URL")
+WEBHOOK_ROOT = os.getenv("WEBHOOK_URL")          # e.g. https://…render.com
 WEBHOOK_PATH = "webhook"
 PORT         = int(os.getenv("PORT", 10000))
 
 logging.basicConfig(level=logging.INFO,
-                    format="%(levelname)s:%(name)s:%(message)s")
+                    format="%(levelname)s | %(name)s | %(message)s")
 log = logging.getLogger(__name__)
 
-# ──────────────────────────────────────────────────────────────────────────
-# command-menu we want to push to Telegram clients
+# ─── command menu we want Telegram to show ───────────────────────
 COMMAND_MENU = [
     BotCommand("start",          "Restart the bot"),
     BotCommand("help",           "Show help message"),
@@ -39,46 +45,58 @@ COMMAND_MENU = [
     BotCommand("streak_alerts",  "Toggle streak alerts"),
 ]
 
-# ──────────────────────────────────────────────────────────────────────────
-async def _set_bot_menu(app: Application):
-    await app.bot.set_my_commands(COMMAND_MENU)
+# ─── helpers to push the menu after the bot is ready ─────────────
+async def _do_set_menu(app: Application):
+    """Actually call set_my_commands for all scopes."""
+    await app.bot.set_my_commands(COMMAND_MENU)  # default scope
+    # ensure users in private & group chats also see it:
+    await app.bot.set_my_commands(COMMAND_MENU, scope=BotCommandScopeAllPrivateChats())
+    await app.bot.set_my_commands(COMMAND_MENU, scope=BotCommandScopeAllGroupChats())
+    log.info("✅ Command menu set")
 
+def _post_init_sync(app: Application):
+    """Non-async wrapper that schedules the async _do_set_menu."""
+    asyncio.create_task(_do_set_menu(app))
+
+# ─── build PTB application ───────────────────────────────────────
 def build_app() -> Application:
-    # register post-init on the *builder*, THEN build
     builder = (Application.builder()
                .token(BOT_TOKEN)
-               .post_init(_set_bot_menu))
+               .post_init(_post_init_sync))     # <-- sync wrapper
     app = builder.build()
 
     # /start and /help
     async def start(u, c):
-        await u.message.reply_markdown("*Welcome to Legalight Study Bot!*\nUse /help to see commands.")
+        await u.message.reply_markdown(
+            "*Welcome to Legalight Study Bot!*\nUse /help to see commands."
+        )
     async def help_(u, c):
         await u.message.reply_markdown(
             "*How to use the bot*\n"
             "• `/task_start MATHS` – begin stopwatch\n"
             "• `/timer` – pick a Pomodoro preset\n"
-            "• `/countdown 2025-12-31 23:59:59 New Year`\n"
+            "• `/countdown 2025-12-31 23:59:59 New Year`  \n"
             "• `/checkin`, `/mystreak`, `/streak_alerts on`\n"
-            "Tap Menu ↓ for the full list."
+            "Tap the menu button (📋) for the full list."
         )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help",  help_))
 
-    # feature sub-modules
+    # feature modules
     timer.register_handlers(app)
     countdown.register_handlers(app)
     streak.register_handlers(app)
     study_tasks.register_handlers(app)
 
-    # unknown command fallback
+    # fallback for unknown commands
     async def unknown(u, c):
         await u.message.reply_text("❓ Unknown command – try /help.")
     app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
     return app
 
-# ──────────────────────────────────────────────────────────────────────────
+# ─── main ────────────────────────────────────────────────────────
 if __name__ == "__main__":
     database.init_db()
 
@@ -91,5 +109,5 @@ if __name__ == "__main__":
         port=PORT,
         url_path=WEBHOOK_PATH,
         webhook_url=webhook_url,
-        stop_signals=None,   # Render stops the container itself
+        stop_signals=None,
     )
