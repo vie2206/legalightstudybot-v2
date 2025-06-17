@@ -140,6 +140,6 @@ async def timer_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def register_handlers(app):
     """Wire up timer commands onto your Application."""
-    app.add_handler(CommandHandler("timer",         timer_start))
-    app.add_handler(CommandHandler("timer_stop",    timer_stop))
-    app.add_handler(CommandHandler("timer_status",  timer_status))
+    app.add_handler(CommandHandler("timer",        timer_start))
+    app.add_handler(CommandHandler("timer_stop",   timer_stop))
+    app.add_handler(CommandHandler("timer_status", timer_status))
