@@ -2,7 +2,13 @@ import os
 import logging
 import asyncio
 from telegram import BotCommand, Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 
 import timer
 import countdown
@@ -57,10 +63,10 @@ async def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
     # Register core handlers
-    app.add_handler(CommandHandler("start",   start))
-    app.add_handler(CommandHandler("help",    help_cmd))
-    # Fallback for any unknown commands (should come last)
-    app.add_handler(CommandHandler(None,      fallback))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
+    # Fallback for any unknown /command
+    app.add_handler(MessageHandler(filters.COMMAND, fallback))
 
     # Register feature modules
     timer.register_handlers(app)
