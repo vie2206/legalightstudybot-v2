@@ -42,10 +42,11 @@ def main():
     # 4) register the study‐task module
     register_task_handlers(app)
 
-    # 5) run webhook (built-in)
+    # 5) run webhook (built‐in)
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
+        path="/webhook",
         webhook_url=f"{WEBHOOK_URL}/webhook"
     )
 
