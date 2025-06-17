@@ -1,63 +1,74 @@
-import os, logging, asyncio
+# Project skeleton for LegalightStudyBot
+# ======================================
+# Main entrypoint: bot.py
+import os
+import logging
+import asyncio
 from flask import Flask, request
-from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+from telegram import Update, BotCommand
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters
 from dotenv import load_dotenv
 
-# --- Load env ---
+# Load environment
 load_dotenv()
-TOKEN     = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://…/webhook
+TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # Full URL to webhook (e.g. https://.../webhook)
+if not TOKEN or not WEBHOOK_URL:
+    raise RuntimeError("BOT_TOKEN and WEBHOOK_URL must be set in environment")
 
-# --- Logging ---
+# Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Flask app ---
+# Initialize Flask and Telegram Application
 app = Flask(__name__)
+bot_app = ApplicationBuilder().token(TOKEN).updater(None).build()
 
-# --- Telegram Application (no Updater/polling) ---
-telegram_app = ApplicationBuilder().token(TOKEN).updater(None).build()
+# Register slash commands at startup
+def set_bot_commands():
+    commands = [
+        BotCommand("start", "Welcome message"),
+        BotCommand("help", "Show help info"),
+        BotCommand("timer", "Start/cancel/check Pomodoro timer"),
+        BotCommand("timer_stop", "Cancel a running Pomodoro"),
+        BotCommand("timer_status", "Show remaining Pomodoro time"),
+        # Add other commands here as features are implemented
+    ]
+    return bot_app.bot.set_my_commands(commands)
 
-# --- Handlers ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Hello! I'm your Legalight Study Bot.\nWe can do hard things 💪")
+# Import feature modules
+timer.register_handlers(bot_app)
+# countdown.register_handlers(bot_app)
+# quiz.register_handlers(bot_app)
+# streaks.register_handlers(bot_app)
+# badges.register_handlers(bot_app)
+# summary.register_handlers(bot_app)
+# reminders.register_handlers(bot_app)
+# sheets.register_handlers(bot_app)
+# admin.register_handlers(bot_app)
+# settings.register_handlers(bot_app)
+# autolog.register_handlers(bot_app)
+# motivational.register_handlers(bot_app)
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("ℹ️ Type /start to begin. More features coming soon!")
-
-async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❓ Sorry, I didn’t understand that. Try /help or /start!")
-
-telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(CommandHandler("help", help_cmd))
-telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, fallback))
-
-# --- Webhook route (PATH only!) ---
+# Webhook endpoint
 @app.post("/webhook")
-async def webhook():
-    """Receive updates at POST /webhook"""
+async def telegram_webhook():
     data = request.get_json(force=True)
-    update = Update.de_json(data, telegram_app.bot)
-    # Initialize, process, and shutdown automatically
-    async with telegram_app:
-        await telegram_app.process_update(update)
+    update = Update.de_json(data, bot_app.bot)
+    async with bot_app:
+        await bot_app.process_update(update)
     return "OK", 200
 
-# --- Startup: set the webhook with Telegram ---
+# Startup: set webhook and commands
 async def on_startup():
-    await telegram_app.bot.set_webhook(WEBHOOK_URL)
-    logger.info(f"✅ Webhook set to {WEBHOOK_URL}")
+    await bot_app.bot.set_webhook(WEBHOOK_URL)
+    logger.info(f"Webhook set to {WEBHOOK_URL}")
+    await set_bot_commands()
+    logger.info("Slash commands registered")
 
 if __name__ == "__main__":
-    # Schedule the webhook setup before serving
+    # Initialize Telegram application and set up webhook/commands
     asyncio.run(on_startup())
-    # Then start Flask
+    # Run Flask app
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
