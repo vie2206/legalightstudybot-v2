@@ -12,12 +12,11 @@ timer_info:   Dict[int, Dict[str, float]] = {}
 async def timer_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /timer [work_min] [break_min]
-    Starts a Pomodoro with an in‐place live countdown.
+    Starts a Pomodoro with an in-place live countdown.
     """
     chat_id = update.effective_chat.id
     args    = context.args or []
 
-    # Parse durations (defaults: 25 work / 5 break)
     try:
         work = int(args[0]) if len(args) >= 1 else 25
         brk  = int(args[1]) if len(args) >= 2 else 5
@@ -97,7 +96,7 @@ async def timer_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         except asyncio.CancelledError:
-            # Clean up countdown message if canceled mid‐phase
+            # Cleanup if canceled mid-phase
             try:
                 await context.bot.delete_message(chat_id, countdown_msg.message_id)
             except Exception:
@@ -106,7 +105,6 @@ async def timer_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             active_timers.pop(chat_id, None)
             timer_info.pop(chat_id, None)
 
-    # Kick off the background task
     task = asyncio.create_task(run_pomodoro())
     active_timers[chat_id] = task
 
@@ -139,7 +137,6 @@ async def timer_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"⏱️ {phase} phase: {m}m {s}s remaining.")
 
 def register_handlers(app):
-    """Wire up timer commands onto your Application."""
     app.add_handler(CommandHandler("timer",        timer_start))
     app.add_handler(CommandHandler("timer_stop",   timer_stop))
     app.add_handler(CommandHandler("timer_status", timer_status))
