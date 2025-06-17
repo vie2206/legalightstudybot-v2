@@ -1,51 +1,69 @@
-# study_tasks.py
 """
-Stop-watch style study tasks with pause / resume / stop.
-Commands
-    /task_start <TYPE?>         – choose or supply one of the TASK_TYPES
-    /task_status                – show elapsed time
-    /task_pause                 – pause
-    /task_resume                – resume
-    /task_stop                  – stop & log
+study_tasks.py  – stop-watch style study sessions
+
+Usage
+─────
+/task_start <TYPE>     → starts immediately (if TYPE supplied)
+/task_start            → shows inline keyboard of types
+/task_status           → show elapsed / paused
+/task_pause            → pause
+/task_resume           → resume
+/task_stop             → finish & log
+
+The module uses context.user_data to keep per-user state.
 """
+
+from __future__ import annotations
 
 import time
-from typing import Dict, Literal
+from enum import Enum, auto
+from typing import Final, Dict
 
 from telegram import (
-    InlineKeyboardButton, InlineKeyboardMarkup, Update
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
 )
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
-    ConversationHandler,
     ContextTypes,
+    ConversationHandler,
 )
 
-TASK_TYPES = [
-    "CLAT_MOCK", "SECTIONAL", "NEWSPAPER", "EDITORIAL", "GK_CA", "MATHS",
-    "LEGAL_REASONING", "LOGICAL_REASONING", "CLATOPEDIA",
-    "SELF_STUDY", "ENGLISH", "STUDY_TASK",
+# ────────────────────────────────────────────────────────────
+class TaskType(str, Enum):
+    CLAT_MOCK        = "CLAT_MOCK"
+    SECTIONAL        = "SECTIONAL"
+    NEWSPAPER        = "NEWSPAPER"
+    EDITORIAL        = "EDITORIAL"
+    GK_CA            = "GK_CA"
+    MATHS            = "MATHS"
+    LEGAL_REASONING  = "LEGAL_REASONING"
+    LOGICAL_REASONING= "LOGICAL_REASONING"
+    CLATOPEDIA       = "CLATOPEDIA"
+    SELF_STUDY       = "SELF_STUDY"
+    ENGLISH          = "ENGLISH"
+    STUDY_TASK       = "STUDY_TASK"
+
+PRESETS: Final[list[TaskType]] = [
+    TaskType.CLAT_MOCK, TaskType.SECTIONAL, TaskType.NEWSPAPER,
+    TaskType.EDITORIAL, TaskType.GK_CA,     TaskType.MATHS,
+    TaskType.LEGAL_REASONING, TaskType.LOGICAL_REASONING,
+    TaskType.CLATOPEDIA,      TaskType.SELF_STUDY,
+    TaskType.ENGLISH,         TaskType.STUDY_TASK,
 ]
 
-# ──────────────────────────────────────────────────────────────────────────
-# Simple in-memory store:  chat_id -> task-dict
-active_tasks: Dict[int, Dict[str, float | str | bool]] = {}
+# Conversation state
+CHOOSING = 1
 
-CHOOSING = 1  # Conversation state
-
-# ────────────────── helpers ──────────────────
-def _fmt_hms(seconds: int) -> str:
-    h, m = divmod(seconds, 3600)
-    m, s = divmod(m, 60)
-    return f"{h:02}:{m:02}:{s:02}"
-
+# ────────────────────────────────────────────────────────────
 def _keyboard() -> InlineKeyboardMarkup:
-    rows = []
-    row = []
-    for i, t in enumerate(TASK_TYPES, 1):
-        row.append(InlineKeyboardButton(t, callback_data=t))
+    # 3-buttons per row for readability
+    rows, row = [], []
+    for i, t in enumerate(PRESETS, 1):
+        row.append(InlineKeyboardButton(t.replace("_", " ").title(), callback_data=t))
         if i % 3 == 0:
             rows.append(row)
             row = []
@@ -53,116 +71,124 @@ def _keyboard() -> InlineKeyboardMarkup:
         rows.append(row)
     return InlineKeyboardMarkup(rows)
 
-# ────────────────── command handlers ──────────────────
+# helpers
+def _now() -> float:
+    return time.time()
+
+def _human(seconds: float) -> str:
+    m, s = divmod(int(seconds), 60)
+    h, m = divmod(m, 60)
+    if h:
+        return f"{h}h {m}m {s}s"
+    if m:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+# ────────────────────────────────────────────────────────────
+async def _begin(update_or_q, context: ContextTypes.DEFAULT_TYPE, ttype: TaskType):
+    """Start a task timer; works for /task_start <type> or callback."""
+    chat_id = update_or_q.effective_chat.id
+    context.user_data["task"] = {
+        "type":       ttype,
+        "start":      _now(),
+        "elapsed":    0.0,
+        "is_paused":  False,
+    }
+    msg = await context.bot.send_message(
+        chat_id,
+        f"🟢 *{ttype.replace('_', ' ').title()}* started.\n"
+        "Stop-watch running…\n"
+        "Use /task_pause or /task_stop.",
+        parse_mode="Markdown",
+    )
+    # End the conversation (so keyboard disappears)
+    return ConversationHandler.END
+
+# ────────────────── command callbacks ───────────────────────
 async def task_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /task_start or /task_start <TYPE>
-    """
-    chat_id = update.effective_chat.id
-    # If a task is already running – reject
-    if chat_id in active_tasks and active_tasks[chat_id]["running"]:
-        return await update.message.reply_text(
-            "⚠️ A task is already running. Use /task_stop first."
-        )
-
-    # Immediate start when type arg supplied
+    """`/task_start [TYPE]` – with type = start, else show chooser."""
     if context.args:
-        task_type = context.args[0].upper()
-        if task_type not in TASK_TYPES:
-            return await update.message.reply_text(
-                "❌ Unknown type. Valid types:\n" + ", ".join(TASK_TYPES)
-            )
-        await _begin_task(update, context, task_type)
-        return ConversationHandler.END
+        try:
+            ttype = TaskType(context.args[0].upper())
+        except ValueError:
+            return await update.message.reply_text("❌ Invalid type. Use /task_start to pick from the list.")
+        return await _begin(update, context, ttype)
 
-    # Otherwise show chooser
+    # No arg → show inline keyboard
     await update.message.reply_text(
-        "Select your study task:", reply_markup=_keyboard()
+        "Select a study task:",
+        reply_markup=_keyboard(),
     )
     return CHOOSING
 
 async def preset_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    task_type = query.data
-    # Use the CallbackQuery’s message instead of update.message
-    await _begin_task(query, context, task_type)
-    return ConversationHandler.END
-
-async def _begin_task(msg_or_query, context: ContextTypes.DEFAULT_TYPE, task_type: str):
-    chat_id = msg_or_query.message.chat.id
-    start_ts = time.time()
-    active_tasks[chat_id] = {
-        "type": task_type,
-        "start": start_ts,
-        "elapsed": 0.0,
-        "running": True,
-        "paused_at": None,
-    }
-    await msg_or_query.message.reply_text(
-        f"🟢 {task_type.replace('_', ' ').title()} started.\n"
-        f"Stop-watch running…\n"
-        "Use /task_pause or /task_stop."
-    )
+    ttype  = TaskType(query.data)
+    return await _begin(query, context, ttype)
 
 async def task_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    meta = active_tasks.get(chat_id)
-    if not meta:
-        return await update.message.reply_text("ℹ️ No active or paused task.")
-    elapsed = meta["elapsed"]
-    if meta["running"]:
-        elapsed += time.time() - meta["start"]
+    task = context.user_data.get("task")
+    if not task:
+        return await update.message.reply_text("ℹ️ No active task.")
+    elapsed = task["elapsed"]
+    if not task["is_paused"]:
+        elapsed += _now() - task["start"]
     await update.message.reply_text(
-        f"⏱️ {meta['type']}: {_fmt_hms(int(elapsed))} elapsed."
+        f"⏱️ {_human(elapsed)} elapsed on {task['type'].replace('_', ' ').title()}"
+        + (" (paused)" if task["is_paused"] else "")
     )
 
 async def task_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    meta = active_tasks.get(chat_id)
-    if not meta or not meta["running"]:
-        return await update.message.reply_text("ℹ️ Nothing to pause.")
-    meta["elapsed"] += time.time() - meta["start"]
-    meta["running"] = False
-    await update.message.reply_text(
-        f"⏸️ Paused at {_fmt_hms(int(meta['elapsed']))}. Use /task_resume."
-    )
+    task = context.user_data.get("task")
+    if not task or task["is_paused"]:
+        return await update.message.reply_text("ℹ️ No running task to pause.")
+    task["elapsed"] += _now() - task["start"]
+    task["is_paused"] = True
+    await update.message.reply_text("⏸️ Paused.")
 
 async def task_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    meta = active_tasks.get(chat_id)
-    if not meta or meta["running"]:
-        return await update.message.reply_text("ℹ️ Nothing to resume.")
-    meta["start"] = time.time()
-    meta["running"] = True
-    await update.message.reply_text("▶️ Resumed! Use /task_stop when done.")
+    task = context.user_data.get("task")
+    if not task or not task["is_paused"]:
+        return await update.message.reply_text("ℹ️ No paused task to resume.")
+    task["start"] = _now()
+    task["is_paused"] = False
+    await update.message.reply_text("▶️ Resumed.")
 
 async def task_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    meta = active_tasks.pop(chat_id, None)
-    if not meta:
-        return await update.message.reply_text("ℹ️ No active task to stop.")
-    total = meta["elapsed"]
-    if meta["running"]:
-        total += time.time() - meta["start"]
+    task = context.user_data.pop("task", None)
+    if not task:
+        return await update.message.reply_text("ℹ️ No task to stop.")
+    total = task["elapsed"]
+    if not task["is_paused"]:
+        total += _now() - task["start"]
     await update.message.reply_text(
-        f"✅ {meta['type']} completed. Total { _fmt_hms(int(total)) }.\n"
-        "Great work! 🎉"
+        f"✅ Logged {_human(total)} on {task['type'].replace('_', ' ').title()}."
     )
-    # TODO: persist to DB if desired
+    # TODO: store to DB for streaks / summaries
 
-# ────────────────── registration helper ──────────────────
+# ────────────────── registration helper ─────────────────────
 def register_handlers(app: Application):
     wizard = ConversationHandler(
         entry_points=[CommandHandler("task_start", task_start)],
         states={
-            CHOOSING: [CallbackQueryHandler(preset_chosen)],
+            CHOOSING: [
+                CallbackQueryHandler(preset_chosen),
+                # allow these even while keyboard is open
+                CommandHandler("task_start",  task_start),
+                CommandHandler("task_pause",  task_pause),
+                CommandHandler("task_resume", task_resume),
+                CommandHandler("task_stop",   task_stop),
+                CommandHandler("task_status", task_status),
+            ],
         },
         fallbacks=[],
         per_chat=True,
         per_user=True,
         per_message=False,
+        allow_reentry=True,           # re-issue /task_start any time
     )
+
     app.add_handler(wizard)
     app.add_handler(CommandHandler("task_status", task_status))
     app.add_handler(CommandHandler("task_pause",  task_pause))
