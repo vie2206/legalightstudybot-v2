@@ -1,108 +1,116 @@
 # study_tasks.py
+# Module to handle the /task_* commands for stopwatch-style study tasks
+
+import time
 from telegram import Update
-from telegram.ext import CommandHandler, ContextTypes
-from database import SessionLocal
-from models import TaskLog
-import datetime
+from telegram.ext import ContextTypes, CommandHandler
 
-# In‐memory map of user_id → active TaskLog.id
-ACTIVE = {}
+# In-memory store for user tasks: {user_id: meta_dict}
+tasks: dict[int, dict] = {}
 
-VALID_TYPES = TaskLog.TYPES  # pull in the preset list
+# Valid types (should mirror bot.py)
+VALID_TASK_TYPES = [
+    'CLAT_MOCK', 'SECTIONAL', 'NEWSPAPER', 'EDITORIAL', 'GK_CA', 'MATHS',
+    'LEGAL_REASONING', 'LOGICAL_REASONING', 'CLATOPEDIA', 'SELF_STUDY',
+    'ENGLISH', 'STUDY_TASK'
+]
+
+# Helper to format seconds into H:M:S
+def format_duration(seconds: float) -> str:
+    secs = int(seconds)
+    hrs, secs = divmod(secs, 3600)
+    mins, secs = divmod(secs, 60)
+    return f"{hrs:02d}:{mins:02d}:{secs:02d}"
 
 async def task_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user.id
-    chat = update.effective_chat.id
-    if user in ACTIVE:
-        return await update.message.reply_text("🚫 You already have an active task. Use /task_status or /task_stop first.")
-    
+    user_id = update.effective_user.id
     if not context.args:
-        types = ", ".join(VALID_TYPES)
-        return await update.message.reply_text(
-            "Usage: /task_start <type>\n"
-            f"Valid types: {types}"
+        await update.message.reply_text(
+            "Usage: /task_start <type>\n" +
+            "Valid types: " + ", ".join(VALID_TASK_TYPES)
         )
-    ttype = context.args[0].upper()
-    if ttype not in VALID_TYPES:
-        types = ", ".join(VALID_TYPES)
-        return await update.message.reply_text(
-            f"❌ “{ttype}” isn’t in the preset list.\nValid types: {types}"
+        return
+    task_type = context.args[0].upper()
+    if task_type not in VALID_TASK_TYPES:
+        await update.message.reply_text(
+            f"❌ '{task_type}' is not a valid task.\n" +
+            "Use /help to see valid types."
         )
-    
-    db = SessionLocal()
-    now = datetime.datetime.utcnow()
-    log = TaskLog(
-        user_id=user,
-        chat_id=chat,
-        task_type=ttype,
-        start_ts=now,
-        elapsed=0,
-        paused_at=None,
-        end_ts=None
+        return
+    # Start or restart the task
+    tasks[user_id] = {
+        'type': task_type,
+        'start': time.time(),
+        'elapsed': 0.0,
+        'paused': False
+    }
+    await update.message.reply_text(f"▶️ Started '{task_type}'. Good luck! (00:00:00)")
+
+async def task_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    meta = tasks.get(user_id)
+    if not meta:
+        await update.message.reply_text("ℹ️ No active task. Use /task_start to begin.")
+        return
+    if meta['paused']:
+        elapsed = meta['elapsed']
+    else:
+        elapsed = meta['elapsed'] + (time.time() - meta['start'])
+    await update.message.reply_text(
+        f"⏱️ '{meta['type']}' elapsed: {format_duration(elapsed)}"
     )
-    db.add(log)
-    db.commit()
-    ACTIVE[user] = log.id
-    await update.message.reply_text(f"▶️ Started **{ttype}**. Use /task_pause, /task_resume, /task_stop or /task_status.")
 
 async def task_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user.id
-    log_id = ACTIVE.get(user)
-    if not log_id:
-        return await update.message.reply_text("❌ No active task to pause.")
-    db = SessionLocal()
-    log = db.get(TaskLog, log_id)
-    if log.paused_at is None:
-        now = datetime.datetime.utcnow()
-        log.elapsed += int((now - log.start_ts).total_seconds())
-        log.paused_at = now
-        db.commit()
-        await update.message.reply_text(f"⏸ Paused **{log.task_type}**. Elapsed: {log.elapsed_str()}")
-    else:
-        await update.message.reply_text("⚠️ Already paused.")
+    user_id = update.effective_user.id
+    meta = tasks.get(user_id)
+    if not meta:
+        await update.message.reply_text("ℹ️ No active task to pause.")
+        return
+    if meta['paused']:
+        await update.message.reply_text("ℹ️ Task is already paused.")
+        return
+    # Pause it
+    now = time.time()
+    meta['elapsed'] += (now - meta['start'])
+    meta['paused'] = True
+    await update.message.reply_text(
+        f"⏸️ Paused '{meta['type']}' at {format_duration(meta['elapsed'])}."
+    )
 
 async def task_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user.id
-    log_id = ACTIVE.get(user)
-    if not log_id:
-        return await update.message.reply_text("❌ No paused task to resume.")
-    db = SessionLocal()
-    log = db.get(TaskLog, log_id)
-    if log.paused_at:
-        now = datetime.datetime.utcnow()
-        log.start_ts = now
-        log.paused_at = None
-        db.commit()
-        await update.message.reply_text(f"▶️ Resumed **{log.task_type}**. Elapsed so far: {log.elapsed_str()}")
-    else:
-        await update.message.reply_text("⚠️ It isn’t paused right now.")
+    user_id = update.effective_user.id
+    meta = tasks.get(user_id)
+    if not meta:
+        await update.message.reply_text("ℹ️ No paused task to resume.")
+        return
+    if not meta['paused']:
+        await update.message.reply_text("ℹ️ Task is already running.")
+        return
+    # Resume
+    meta['start'] = time.time()
+    meta['paused'] = False
+    await update.message.reply_text(f"▶️ Resumed '{meta['type']}' ({format_duration(meta['elapsed'])}).")
 
 async def task_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user.id
-    log_id = ACTIVE.pop(user, None)
-    if not log_id:
-        return await update.message.reply_text("❌ No active task to stop.")
-    db = SessionLocal()
-    log = db.get(TaskLog, log_id)
-    now = datetime.datetime.utcnow()
-    if log.paused_at is None:
-        log.elapsed += int((now - log.start_ts).total_seconds())
-    log.end_ts = now
-    db.commit()
-    await update.message.reply_text(f"✅ Completed **{log.task_type}**: {log.elapsed_str()}")
-    
-async def task_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user.id
-    log_id = ACTIVE.get(user)
-    if not log_id:
-        return await update.message.reply_text("ℹ️ No active task right now.")
-    db = SessionLocal()
-    log = db.get(TaskLog, log_id)
-    await update.message.reply_text(f"⏳ **{log.task_type}**: {log.elapsed_str()} (running)")
+    user_id = update.effective_user.id
+    meta = tasks.pop(user_id, None)
+    if not meta:
+        await update.message.reply_text("ℹ️ No active task to stop.")
+        return
+    if not meta['paused']:
+        # finish running segment
+        meta['elapsed'] += (time.time() - meta['start'])
+    duration = format_duration(meta['elapsed'])
+    # TODO: log to database here
+    await update.message.reply_text(
+        f"✅ Completed '{meta['type']}' — Duration: {duration}. Well done!"
+    )
+
+# Register all handlers on the Application
 
 def register_handlers(app):
     app.add_handler(CommandHandler("task_start", task_start))
+    app.add_handler(CommandHandler("task_status", task_status))
     app.add_handler(CommandHandler("task_pause", task_pause))
     app.add_handler(CommandHandler("task_resume", task_resume))
     app.add_handler(CommandHandler("task_stop", task_stop))
-    app.add_handler(CommandHandler("task_status", task_status))
