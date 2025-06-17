@@ -1,187 +1,188 @@
-import asyncio
-import time
-from typing import Dict
+"""
+timer.py  – Named Pomodoro with pause / resume
+Compatible with python-telegram-bot 20.x async
+"""
 
-from telegram import Update
-from telegram.ext import ContextTypes, CommandHandler
+import datetime as dt
+from typing import Dict, Optional
 
-# In-memory storage
-active_timers: Dict[int, asyncio.Task] = {}
-timer_info:   Dict[int, Dict[str, float]] = {}
+from telegram import Update, Message
+from telegram.ext import (
+    Application,
+    CallbackContext,
+    CommandHandler,
+    ContextTypes,
+)
 
+# --------------------------------------------------------------------- #
+# In-memory state
+# --------------------------------------------------------------------- #
+class Session:
+    def __init__(
+        self,
+        session: str,
+        work_sec: int,
+        break_sec: int,
+        chat_id: int,
+        msg_id: Optional[int] = None,
+    ):
+        self.session = session
+        self.work_sec = work_sec
+        self.break_sec = break_sec
+        self.chat_id = chat_id
+        self.msg_id = msg_id
+        self.phase = "study"          # or "break"
+        self.end_at = dt.datetime.utcnow() + dt.timedelta(seconds=work_sec)
+        self.paused_remaining = None  # seconds
+
+    def remaining(self) -> int:
+        return max(0, int((self.end_at - dt.datetime.utcnow()).total_seconds()))
+
+
+ACTIVE: Dict[int, Session] = {}  # keyed by chat_id
+
+TICK = 5  # seconds between status edits
+
+
+# --------------------------------------------------------------------- #
+# Helpers
+# --------------------------------------------------------------------- #
+def _format(sec: int) -> str:
+    m, s = divmod(sec, 60)
+    return f"{m}m {s}s"
+
+
+async def _tick(context: CallbackContext) -> None:
+    chat_id = context.job.chat_id
+    ses = ACTIVE.get(chat_id)
+    if not ses:
+        return
+
+    # Finished?
+    if ses.remaining() == 0:
+        if ses.phase == "study":
+            # switch to break
+            ses.phase = "break"
+            ses.end_at = dt.datetime.utcnow() + dt.timedelta(seconds=ses.break_sec)
+            await context.bot.send_message(
+                chat_id, f"⏰ Study phase done! Break starts for {ses.break_sec//60}m"
+            )
+        else:
+            await context.bot.send_message(
+                chat_id,
+                f"✅ Break over – '{ses.session}' Pomodoro complete!",
+            )
+            ACTIVE.pop(chat_id, None)
+            return  # no re-queue
+
+    # Still running – update or send message
+    txt = (
+        ("📚" if ses.phase == "study" else "☕")
+        + f" {ses.phase.capitalize()} '{ses.session}': { _format(ses.remaining()) }"
+    )
+    try:
+        if ses.msg_id:
+            await context.bot.edit_message_text(
+                chat_id=chat_id, message_id=ses.msg_id, text=txt
+            )
+        else:
+            m: Message = await context.bot.send_message(chat_id, txt)
+            ses.msg_id = m.message_id
+    except Exception:
+        # message might be gone – send new
+        m: Message = await context.bot.send_message(chat_id, txt)
+        ses.msg_id = m.message_id
+
+    # re-schedule
+    context.job_queue.run_once(_tick, TICK, chat_id=chat_id)
+
+
+# --------------------------------------------------------------------- #
+# Commands
+# --------------------------------------------------------------------- #
 async def timer_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /timer <name> <study_min> <break_min>
-    Starts a named study session with live countdown.
-    """
     chat_id = update.effective_chat.id
-    args    = context.args or []
+    args = context.args
 
     if len(args) < 3:
-        return await update.message.reply_text(
-            "❌ Usage: /timer <session_name> <study_min> <break_min>\n"
-            "Example: /timer Math 25 5"
+        await update.message.reply_text(
+            "❌ Usage: /timer <name> <study_min> <break_min>\n"
+            "Example: /timer Maths 25 5"
         )
+        return
 
-    session_name = args[0]
+    name = args[0]
     try:
         work = int(args[1])
-        brk  = int(args[2])
+        brk = int(args[2])
     except ValueError:
-        return await update.message.reply_text(
-            "❌ Minutes must be whole numbers.\nExample: /timer Math 25 5"
-        )
+        await update.message.reply_text("Minutes must be whole numbers.")
+        return
 
-    # Cancel existing
-    if chat_id in active_timers:
-        active_timers[chat_id].cancel()
+    # Clear any existing session
+    ACTIVE.pop(chat_id, None)
 
-    # Store metadata
-    timer_info[chat_id] = {
-        "session":        session_name,
-        "phase":          "study",
-        "study_duration": work * 60,
-        "break_duration": brk  * 60,
-        "remaining":      work * 60,
-        "start":          time.time(),
-    }
+    ses = Session(name, work * 60, brk * 60, chat_id)
+    ACTIVE[chat_id] = ses
 
     await update.message.reply_text(
-        f"🟢 Started '{session_name}': {work}m study → {brk}m break."
+        f"🟢 Started '{name}': {work}m study → {brk}m break."
     )
-    # Launch countdown task
-    asyncio.create_task(_run_phase(chat_id, context))
+    context.job_queue.run_once(_tick, 0, chat_id=chat_id)
+
 
 async def timer_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Pauses the active session."""
     chat_id = update.effective_chat.id
-    meta    = timer_info.get(chat_id)
-    task    = active_timers.pop(chat_id, None)
+    ses = ACTIVE.get(chat_id)
+    if not ses or ses.paused_remaining is not None:
+        await update.message.reply_text("ℹ️ No running session to pause.")
+        return
 
-    if not meta or not task:
-        return await update.message.reply_text("ℹ️ No active session to pause.")
-
-    # Update remaining and cancel
-    elapsed           = time.time() - meta["start"]
-    meta["remaining"] = max(0, meta["remaining"] - elapsed)
-    task.cancel()
-    m, s = divmod(int(meta["remaining"]), 60)
+    ses.paused_remaining = ses.remaining()
     await update.message.reply_text(
-        f"⏸️ Paused '{meta['session']}': {m}m {s}s left."
+        f"⏸️ Paused '{ses.session}' with {_format(ses.paused_remaining)} left."
     )
+
 
 async def timer_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Resumes a paused session."""
     chat_id = update.effective_chat.id
-    meta    = timer_info.get(chat_id)
+    ses = ACTIVE.get(chat_id)
+    if not ses or ses.paused_remaining is None:
+        await update.message.reply_text("ℹ️ No paused session to resume.")
+        return
 
-    if not meta or chat_id in active_timers:
-        return await update.message.reply_text("ℹ️ No paused session to resume.")
-
-    meta["start"] = time.time()
-    remaining      = meta["remaining"]
-    m, s = divmod(int(remaining), 60)
+    ses.end_at = dt.datetime.utcnow() + dt.timedelta(seconds=ses.paused_remaining)
+    ses.paused_remaining = None
     await update.message.reply_text(
-        f"▶️ Resumed '{meta['session']}' ({meta['phase'].capitalize()}): {m}m {s}s left."
+        f"▶️ Resumed '{ses.session}' – {_format(ses.remaining())} left."
     )
-    asyncio.create_task(_run_phase(chat_id, context))
+    context.job_queue.run_once(_tick, 0, chat_id=chat_id)
+
 
 async def timer_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Cancels any active or paused session."""
-    chat_id = update.effective_chat.id
-    task    = active_timers.pop(chat_id, None)
-    meta    = timer_info.pop(chat_id, None)
-
-    if task:
-        task.cancel()
+    if ACTIVE.pop(update.effective_chat.id, None):
         await update.message.reply_text("🚫 Session canceled.")
     else:
         await update.message.reply_text("ℹ️ No active session to cancel.")
 
+
 async def timer_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Shows remaining time and phase."""
-    chat_id = update.effective_chat.id
-    meta    = timer_info.get(chat_id)
-    task    = active_timers.get(chat_id)
-
-    if not meta:
-        return await update.message.reply_text("ℹ️ No session in progress.")
-
-    if task:
-        elapsed   = time.time() - meta["start"]
-        remaining = max(0, meta["remaining"] - elapsed)
+    ses = ACTIVE.get(update.effective_chat.id)
+    if not ses:
+        await update.message.reply_text("ℹ️ No session running.")
     else:
-        remaining = meta["remaining"]
-
-    m, s = divmod(int(remaining), 60)
-    icon       = "📚" if meta["phase"] == "study" else "☕"
-    phase_name = "Study" if meta["phase"] == "study" else "Break"
-    await update.message.reply_text(
-        f"{icon} {phase_name} '{meta['session']}': {m}m {s}s remaining."
-    )
-
-async def _run_phase(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Internal: countdown loop for current phase, then auto-transition."""
-    meta = timer_info.get(chat_id)
-    if not meta:
-        return
-    task = asyncio.current_task()
-    active_timers[chat_id] = task
-
-    try:
-        end_time = time.time() + meta["remaining"]
-        # send initial or reuse
-        msg = await context.bot.send_message(
-            chat_id,
-            f"{('📚' if meta['phase']=='study' else '☕')} "
-            f"{meta['phase'].capitalize()} '{meta['session']}': {int(meta['remaining']//60)}m {int(meta['remaining']%60)}s remaining."
+        await update.message.reply_text(
+            ("📚" if ses.phase == "study" else "☕")
+            + f" {ses.phase.capitalize()} '{ses.session}': {_format(ses.remaining())}"
         )
-        msg_id = msg.message_id
-
-        while True:
-            remain = end_time - time.time()
-            if remain <= 0:
-                break
-            m, s = divmod(int(remain), 60)
-            text = (
-                f"{('📚' if meta['phase']=='study' else '☕')} "
-                f"{meta['phase'].capitalize()} '{meta['session']}': {m}m {s}s remaining."
-            )
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=msg_id,
-                    text=text
-                )
-            except Exception:
-                pass
-            await asyncio.sleep(5)
-
-        # Phase ends
-        if meta["phase"] == "study":
-            await context.bot.send_message(
-                chat_id,
-                f"⏰ Study '{meta['session']}' over! Break for {meta['break_duration']//60}m starts."
-            )
-            meta["phase"]    = "break"
-            meta["remaining"] = meta["break_duration"]
-            meta["start"]     = time.time()
-            await _run_phase(chat_id, context)
-        else:
-            await context.bot.send_message(
-                chat_id,
-                f"✅ Break over! '{meta['session']}' complete."
-            )
-            timer_info.pop(chat_id, None)
-            active_timers.pop(chat_id, None)
-
-    except asyncio.CancelledError:
-        pass
 
 
-def register_handlers(app):
-    app.add_handler(CommandHandler("timer",        timer_start))
-    app.add_handler(CommandHandler("timer_pause",  timer_pause))
+# --------------------------------------------------------------------- #
+# Registration helper
+# --------------------------------------------------------------------- #
+def register_handlers(app: Application) -> None:
+    app.add_handler(CommandHandler("timer", timer_start))
+    app.add_handler(CommandHandler("timer_pause", timer_pause))
     app.add_handler(CommandHandler("timer_resume", timer_resume))
     app.add_handler(CommandHandler("timer_status", timer_status))
-    app.add_handler(CommandHandler("timer_stop",   timer_stop))
+    app.add_handler(CommandHandler("timer_stop", timer_stop))
