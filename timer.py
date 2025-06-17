@@ -1,140 +1,197 @@
-# timer.py ─────────────────────────────────────────────────────
+# timer.py
 """
-Interactive Pomodoro timer with inline presets + classic commands.
+Interactive Pomodoro timer:
+  • /timer         – inline wizard with presets + custom
+  • /timer_pause   /timer_resume /timer_stop /timer_status
 """
 
-import asyncio, time
-from typing import Dict
+import asyncio
+import time
+from typing import Dict, Tuple
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.ext import (
-    Application, CallbackQueryHandler, CommandHandler, ConversationHandler,
-    ContextTypes, MessageHandler, filters,
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ConversationHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
 )
 
+# ────────────────────────────── state constants
 CHOOSING, ASK_WORK, ASK_BREAK = range(3)
 
-active: Dict[int, asyncio.Task]  = {}
-meta:   Dict[int, dict]          = {}
+# in-memory per-chat storage
+active: Dict[int, asyncio.Task] = {}      # chat_id → asyncio.Task
+meta:   Dict[int, dict]          = {}      # chat_id → session metadata
 
-# ─── helpers
-def _secs(m: int) -> int: return max(1, m) * 60
 
-# ─── wizard
-async def wizard_entry(u: Update, _):
+# ────────────────────────────── helpers
+def _mins(m: int) -> int: return max(1, m) * 60
+
+
+def _remaining(m: dict) -> int:
+    """seconds left in current phase"""
+    return max(0, int(m["end_time"] - time.time()))
+
+
+def _fmt(sec: int) -> Tuple[int, int]:
+    m, s = divmod(sec, 60)
+    return m, s
+
+
+# ────────────────────────────── wizard entry
+async def wizard_entry(update: Update, _ctx):
     kb = [
-        [InlineKeyboardButton("Pomodoro 25 | 5", callback_data="25|5"),
-         InlineKeyboardButton("Focus 50 | 10",   callback_data="50|10")],
-        [InlineKeyboardButton("Custom ➕", callback_data="custom")],
+        [
+            InlineKeyboardButton("Pomodoro 25 | 5", callback_data="25|5"),
+            InlineKeyboardButton("Focus 50 | 10",   callback_data="50|10"),
+        ],
+        [InlineKeyboardButton("Custom  ➕", callback_data="custom")],
     ]
-    await u.message.reply_text(
+    await update.message.reply_text(
         "Choose a preset or tap *Custom ➕*:",
         reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode="Markdown"
+        parse_mode="Markdown",
     )
     return CHOOSING
 
-async def preset_chosen(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = u.callback_query; await q.answer()
-    w, b = map(int, q.data.split("|"))
-    return await _begin(q, ctx, w, b)
 
-async def custom_chosen(u: Update, _):
-    q = u.callback_query; await q.answer()
+# ────────────────────────────── preset flow
+async def preset_chosen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    work, brk = map(int, q.data.split("|"))
+    await _begin_session(q.message.chat.id, ctx, work, brk)
+    await q.edit_message_text("✅ Preset started!")
+    return ConversationHandler.END
+
+
+# ────────────────────────────── custom flow
+async def custom_chosen(update: Update, _ctx):
+    q = update.callback_query
+    await q.answer()
     await q.edit_message_text("Work minutes?")
     return ASK_WORK
 
-async def ask_break(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data["work"] = int(u.message.text)
-    await u.message.reply_text("Break minutes?")
+
+async def ask_break(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["work"] = int(update.message.text)
+    await update.message.reply_text("Break minutes?")
     return ASK_BREAK
 
-async def custom_finish(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    w = ctx.user_data["work"]; b = int(u.message.text)
-    return await _begin(u, ctx, w, b)
 
-# ─── core
-async def _begin(origin, ctx: ContextTypes.DEFAULT_TYPE, work, brk):
-    chat = origin.message.chat if hasattr(origin, "message") else origin.effective_chat
-    cid  = chat.id
+async def custom_finish(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    work = ctx.user_data["work"]
+    brk  = int(update.message.text)
+    await _begin_session(update.effective_chat.id, ctx, work, brk)
+    return ConversationHandler.END
 
-    if (t := active.pop(cid, None)): t.cancel()
-    meta[cid] = m = {
-        "phase":"work","rem":_secs(work),
-        "work":_secs(work),"break":_secs(brk),"start":time.time()
+
+# ────────────────────────────── core session logic
+async def _begin_session(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE,
+                         work_min: int, break_min: int):
+    # cancel previous
+    if task := active.pop(chat_id, None):
+        task.cancel()
+
+    meta[chat_id] = m = {
+        "phase": "work",
+        "work_dur":  _mins(work_min),
+        "break_dur": _mins(break_min),
+        "end_time":  time.time() + _mins(work_min),
     }
 
     await ctx.bot.send_message(
-        cid,
-        f"🟢 *Study* started • {work}-min focus → {brk}-min break.\n"
-        "Use /timer_pause /timer_resume /timer_stop.",
-        parse_mode="Markdown"
+        chat_id,
+        f"🟢 Study started • {work_min}-min focus → {break_min}-min break.\n"
+        "Use /timer_pause or /timer_stop."
     )
-    _launch(cid, ctx.bot)
-    return ConversationHandler.END
 
-def _launch(cid: int, bot):
-    m = meta[cid]
     async def loop():
         try:
-            end = time.time() + m["rem"]
             while True:
-                rem = int(end - time.time())
-                if rem <= 0: break
+                if _remaining(m) == 0:
+                    # phase switch
+                    if m["phase"] == "work":
+                        m["phase"] = "break"
+                        m["end_time"] = time.time() + m["break_dur"]
+                        await ctx.bot.send_message(chat_id, "⏰ Break time!")
+                    else:
+                        await ctx.bot.send_message(chat_id, "✅ Session complete!")
+                        break
                 await asyncio.sleep(5)
-            # switch
-            if m["phase"] == "work":
-                m["phase"] = "break"; m["rem"] = m["break"]; m["start"]=time.time()
-                await bot.send_message(cid, f"⏰ Break {m['break']//60}-min!")
-                _launch(cid, bot)
-            else:
-                await bot.send_message(cid, "✅ Session complete!")
-                active.pop(cid, None); meta.pop(cid,None)
-        except asyncio.CancelledError: pass
-    active[cid] = asyncio.create_task(loop())
+        finally:
+            active.pop(chat_id, None)
+            meta.pop(chat_id, None)
 
-# ─── classic controls
-async def _pause_resume(update: Update, ctx: ContextTypes.DEFAULT_TYPE, pause: bool):
+    active[chat_id] = asyncio.create_task(loop())
+
+
+# ────────────────────────────── pause / resume / stop / status
+async def pause(update: Update, _ctx):
     cid = update.effective_chat.id
-    m   = meta.get(cid); t = active.get(cid)
-    if not m: return await update.message.reply_text("ℹ️ No active timer.")
-    if pause and t:
-        m["rem"] = max(0, m["rem"] - (time.time()-m["start"]))
-        t.cancel(); active.pop(cid,None)
-        await update.message.reply_text("⏸️ Paused.")
-    elif not pause and not t:
-        m["start"] = time.time(); _launch(cid, ctx.bot)
-        await update.message.reply_text("▶️ Resumed.")
+    if cid not in meta or cid not in active:
+        return await update.message.reply_text("ℹ️ Nothing to pause.")
+    remaining = _remaining(meta[cid])
+    active[cid].cancel()
+    meta[cid]["pause_left"] = remaining
+    await update.message.reply_text("⏸️ Paused.")
 
-async def pause(u,c):  await _pause_resume(u,c,True)
-async def resume(u,c): await _pause_resume(u,c,False)
 
-async def stop(update: Update, _):
+async def resume(update: Update, ctx):
     cid = update.effective_chat.id
-    if (t:=active.pop(cid,None)): t.cancel()
-    meta.pop(cid,None)
+    m = meta.get(cid)
+    if not m or cid in active:
+        return await update.message.reply_text("ℹ️ Nothing to resume.")
+    m["end_time"] = time.time() + m.pop("pause_left")
+    async def loop_wrap(): await _begin_session(cid, ctx, m["work_dur"]//60, m["break_dur"]//60)
+    # reuse the same loop logic
+    active[cid] = asyncio.create_task(loop_wrap())
+    await update.message.reply_text("▶️ Resumed.")
+
+
+async def stop(update: Update, _ctx):
+    cid = update.effective_chat.id
+    if task := active.pop(cid, None):
+        task.cancel()
+    meta.pop(cid, None)
     await update.message.reply_text("🚫 Timer cancelled.")
 
-async def status(update: Update, _):
-    m = meta.get(update.effective_chat.id)
-    if not m: return await update.message.reply_text("ℹ️ No active timer.")
-    rem = m["rem"] - (time.time()-m["start"])
-    mins, sec = divmod(int(rem), 60)
-    await update.message.reply_text(f"⏱ {mins}m {sec}s remaining.")
 
-# ─── registration
+async def status(update: Update, _ctx):
+    cid = update.effective_chat.id
+    m = meta.get(cid)
+    if not m:
+        return await update.message.reply_text("ℹ️ No active timer.")
+    mins, secs = _fmt(_remaining(m))
+    phase = "Focus" if m["phase"] == "work" else "Break"
+    await update.message.reply_text(f"⏱ {phase}: {mins} m {secs} s remaining.")
+
+
+# ────────────────────────────── registration
 def register_handlers(app: Application):
     wizard = ConversationHandler(
-        [CommandHandler("timer", wizard_entry)],
+        entry_points=[CommandHandler("timer", wizard_entry)],
         states={
-            CHOOSING:[CallbackQueryHandler(preset_chosen, r"^\d+\|\d+$"),
-                      CallbackQueryHandler(custom_chosen,  r"^custom$")],
-            ASK_WORK:[MessageHandler(filters.Regex(r"^\d+$"), ask_break)],
-            ASK_BREAK:[MessageHandler(filters.Regex(r"^\d+$"), custom_finish)],
+            CHOOSING: [
+                CallbackQueryHandler(preset_chosen, pattern=r"^\d+\|\d+$"),
+                CallbackQueryHandler(custom_chosen,  pattern="^custom$"),
+            ],
+            ASK_WORK:  [MessageHandler(filters.Regex(r"^\d+$"), ask_break)],
+            ASK_BREAK: [MessageHandler(filters.Regex(r"^\d+$"), custom_finish)],
         },
+        fallbacks=[CommandHandler("cancel", stop)],   # required
         per_chat=True,
     )
     app.add_handler(wizard)
+
     app.add_handler(CommandHandler("timer_status", status))
     app.add_handler(CommandHandler("timer_pause",  pause))
     app.add_handler(CommandHandler("timer_resume", resume))
