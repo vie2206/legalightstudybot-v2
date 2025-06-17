@@ -1,24 +1,32 @@
 import os
-from flask import Flask, request
-from telegram import Update
+import logging
+
+from telegram import BotCommand, Update
 from telegram.ext import (
     ApplicationBuilder,
-    ContextTypes,
     CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
 )
-import countdown  # our countdown module
 
-# Load from environment
-BOT_TOKEN   = os.environ["BOT_TOKEN"]
-WEBHOOK_URL = os.environ["WEBHOOK_URL"]  # e.g. https://yourapp.onrender.com
+import timer
+import countdown
+from dotenv import load_dotenv
 
-# Flask app
-app = Flask(__name__)
+# ─── Load environment & configure logging ───────────────────────────────────────
+load_dotenv()
+TOKEN       = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")    # e.g. https://yourapp.onrender.com
+PORT        = int(os.getenv("PORT", "10000"))
 
-# Telegram Application
-telegram_app = ApplicationBuilder().token(BOT_TOKEN).build()
+if not TOKEN or not WEBHOOK_URL:
+    raise RuntimeError("BOT_TOKEN and WEBHOOK_URL must be set in environment")
 
-# ─── BASIC HANDLERS ────────────────────────────────────────────────────────────
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# ─── Core command handlers ──────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Welcome to LegalightStudyBot!\n"
@@ -26,38 +34,57 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📚 *Commands:* (Markdown)\n"
+    await update.message.reply_markdown(
+        "📚 *Commands:*\n"
         "/start — Restart bot\n"
-        "/help — This message\n\n"
-        "⏳ *Countdown:* /countdown <YYYY-MM-DD> [HH:MM:SS] <label> [--pin]\n"
-        "/countdown_status — Show remaining once\n"
-        "/countdown_stop — Cancel live countdown",
-        parse_mode="Markdown",
+        "/help  — Show this help message\n\n"
+        "⏲️ *Pomodoro Timer* (/timer …)\n"
+        "📅 *Countdown* (/countdown …)\n"
     )
 
-# register basic commands
-telegram_app.add_handler(CommandHandler("start", start))
-telegram_app.add_handler(CommandHandler("help",  help_cmd))
+async def fallback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "❓ Unknown command. Try /help."
+    )
 
-# ─── COUNTDOWN HANDLERS ─────────────────────────────────────────────────────────
-# this will add /countdown, /countdown_status & /countdown_stop
-countdown.register_handlers(telegram_app)
+# ─── Application setup & webhook launch ────────────────────────────────────────
+def main():
+    # Build the application
+    app = ApplicationBuilder().token(TOKEN).build()
 
-# ─── WEBHOOK ROUTE ──────────────────────────────────────────────────────────────
-@app.post("/webhook")
-async def telegram_webhook():
-    """Receive updates from Telegram."""
-    data = request.get_json(force=True)
-    update = Update.de_json(data, telegram_app.bot)
-    await telegram_app.process_update(update)
-    return "OK"
+    # Register core handlers
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help",  help_cmd))
 
-# ─── RUN ────────────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
-    telegram_app.run_webhook(
+    # Register your feature modules
+    timer.register_handlers(app)
+    countdown.register_handlers(app)
+
+    # Catch-all for any other /command
+    app.add_handler(MessageHandler(filters.COMMAND, fallback))
+
+    # Configure the Telegram menu of slash commands
+    app.bot.set_my_commands([
+        BotCommand("start",            "Restart the bot"),
+        BotCommand("help",             "Show help message"),
+        BotCommand("timer",            "Start a Pomodoro session"),
+        BotCommand("timer_pause",      "Pause session"),
+        BotCommand("timer_resume",     "Resume session"),
+        BotCommand("timer_status",     "Show remaining time"),
+        BotCommand("timer_stop",       "Cancel session"),
+        BotCommand("countdown",        "Start live countdown"),
+        BotCommand("countdown_status", "Show remaining once"),
+        BotCommand("countdown_stop",   "Cancel live countdown"),
+    ])
+    logger.info("✅ Commands registered")
+
+    # Start the built-in webhook server (no Flask)
+    app.run_webhook(
         listen="0.0.0.0",
-        port=int(os.environ.get("PORT", 10000)),
+        port=PORT,
+        url_path="webhook",
         webhook_url=f"{WEBHOOK_URL}/webhook",
-        app=app,
     )
+
+if __name__ == "__main__":
+    main()
