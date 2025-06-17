@@ -15,7 +15,7 @@ from datetime import date, datetime, timezone, timedelta
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, CallbackContext
 
-# Simple in-memory stores (replace by DB later)
+# Simple in‑memory stores (replace by DB later)
 _last_checkin = {}          # user_id -> date
 _streak_len = {}            # user_id -> int
 _alert_pref = {}            # user_id -> bool
@@ -39,7 +39,7 @@ async def _record_checkin(user_id: int):
 
 async def checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _record_checkin(update.effective_user.id)
-    await update.message.reply_text("✅ Check-in recorded! Keep it up 🔥")
+    await update.message.reply_text("✅ Check‑in recorded! Keep it up 🔥")
 
 async def mystreak(update: Update, context: ContextTypes.DEFAULT_TYPE):
     length = _streak_len.get(update.effective_user.id, 0)
