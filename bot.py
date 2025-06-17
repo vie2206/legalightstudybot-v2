@@ -14,6 +14,7 @@ from telegram.ext import (
 import timer
 import countdown
 from dotenv import load_dotenv
+from database import init_db
 
 # ─── Load env & configure logging ───────────────────────────────────────────────
 load_dotenv()
@@ -96,4 +97,6 @@ async def main():
     await app.updater.idle()
 
 if __name__ == "__main__":
+    # Make sure our tables exist
+    init_db()
     asyncio.run(main())
