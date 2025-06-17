@@ -1,8 +1,11 @@
-# bot.py  – Legalight Study Bot (command-menu fix)
-import logging, os, asyncio
-from functools import partial
+# bot.py  – Legalight Study Bot  (menu-fix + stable startup)
+import logging, os
 from dotenv import load_dotenv
-from telegram import BotCommand, BotCommandScopeAllPrivateChats, BotCommandScopeAllGroupChats
+from telegram import (
+    BotCommand,
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeAllGroupChats,
+)
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -12,18 +15,20 @@ from telegram.ext import (
 
 import database, timer, countdown, streak, study_tasks
 
-# ─── env / logging ───────────────────────────────────────────────
+# ─── env & logging ───────────────────────────────────────────────
 load_dotenv()
 BOT_TOKEN    = os.getenv("BOT_TOKEN")
 WEBHOOK_ROOT = os.getenv("WEBHOOK_URL")          # e.g. https://…render.com
 WEBHOOK_PATH = "webhook"
 PORT         = int(os.getenv("PORT", 10000))
 
-logging.basicConfig(level=logging.INFO,
-                    format="%(levelname)s | %(name)s | %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(levelname)s | %(name)s | %(message)s",
+)
 log = logging.getLogger(__name__)
 
-# ─── command menu we want Telegram to show ───────────────────────
+# ─── command menu to push to Telegram ────────────────────────────
 COMMAND_MENU = [
     BotCommand("start",          "Restart the bot"),
     BotCommand("help",           "Show help message"),
@@ -45,31 +50,28 @@ COMMAND_MENU = [
     BotCommand("streak_alerts",  "Toggle streak alerts"),
 ]
 
-# ─── helpers to push the menu after the bot is ready ─────────────
-async def _do_set_menu(app: Application):
-    """Actually call set_my_commands for all scopes."""
-    await app.bot.set_my_commands(COMMAND_MENU)  # default scope
-    # ensure users in private & group chats also see it:
+async def _push_menu(app: Application):
+    """Runs automatically after PTB finishes init."""
+    await app.bot.set_my_commands(COMMAND_MENU)                                  # default
     await app.bot.set_my_commands(COMMAND_MENU, scope=BotCommandScopeAllPrivateChats())
     await app.bot.set_my_commands(COMMAND_MENU, scope=BotCommandScopeAllGroupChats())
-    log.info("✅ Command menu set")
+    log.info("✅ Telegram command-menu published")
 
-def _post_init_sync(app: Application):
-    """Non-async wrapper that schedules the async _do_set_menu."""
-    asyncio.create_task(_do_set_menu(app))
-
-# ─── build PTB application ───────────────────────────────────────
+# ─── build application ───────────────────────────────────────────
 def build_app() -> Application:
-    builder = (Application.builder()
-               .token(BOT_TOKEN)
-               .post_init(_post_init_sync))     # <-- sync wrapper
-    app = builder.build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(_push_menu)          # PTB awaits this coroutine safely
+        .build()
+    )
 
-    # /start and /help
+    # /start & /help
     async def start(u, c):
         await u.message.reply_markdown(
             "*Welcome to Legalight Study Bot!*\nUse /help to see commands."
         )
+
     async def help_(u, c):
         await u.message.reply_markdown(
             "*How to use the bot*\n"
@@ -83,13 +85,13 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help",  help_))
 
-    # feature modules
+    # plug-in feature modules
     timer.register_handlers(app)
     countdown.register_handlers(app)
     streak.register_handlers(app)
     study_tasks.register_handlers(app)
 
-    # fallback for unknown commands
+    # unknown command fallback
     async def unknown(u, c):
         await u.message.reply_text("❓ Unknown command – try /help.")
     app.add_handler(MessageHandler(filters.COMMAND, unknown))
@@ -109,5 +111,5 @@ if __name__ == "__main__":
         port=PORT,
         url_path=WEBHOOK_PATH,
         webhook_url=webhook_url,
-        stop_signals=None,
+        stop_signals=None,      # Render stops the container itself
     )
