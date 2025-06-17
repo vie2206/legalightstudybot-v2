@@ -1,17 +1,18 @@
 # database.py
+import os
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, declarative_base
+from sqlalchemy.orm import sessionmaker
+from models import Base
 
-# 1) Point to a local file-based SQLite DB
-#    The file 'legalight.db' will be created next to this script.
-ENGINE = create_engine("sqlite:///legalight.db", echo=False, future=True)
+# you can override DATABASE_URL in your Render env-vars; default is a local SQLite file
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./legalight.db")
 
-# 2) Our “base” class for all models (tables)
-Base = declarative_base()
+# for SQLite only: allow multiple threads
+connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
 
-# 3) Session factory to get DB sessions
-SessionLocal = sessionmaker(bind=ENGINE, autoflush=False, autocommit=False, future=True)
+engine = create_engine(DATABASE_URL, connect_args=connect_args)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 def init_db():
     """Create all tables."""
-    Base.metadata.create_all(bind=ENGINE)
+    Base.metadata.create_all(bind=engine)
