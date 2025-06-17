@@ -1,79 +1,75 @@
-# bot.py
 import os
+import asyncio
 from dotenv import load_dotenv
+from flask import Flask, request
+from telegram import Update
 from telegram.ext import (
-    ApplicationBuilder,
+    Application,
     CommandHandler,
     MessageHandler,
-    filters
+    filters,
+    ContextTypes
 )
-from database import init_db
-from study_tasks import register_handlers as register_task_handlers, VALID_TASK_TYPES
+import timer
+import countdown
+import streak
 
 # Load environment variables
-def load_config():
-    load_dotenv()
-    token = os.getenv("BOT_TOKEN")
-    webhook = os.getenv("WEBHOOK_URL", "").rstrip("/")
-    port = int(os.getenv("PORT", "10000"))
-    if not token or not webhook:
-        raise RuntimeError("BOT_TOKEN and WEBHOOK_URL must be set in environment.")
-    return token, webhook, port
+load_dotenv()
+TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # root URL, no '/webhook'
 
-async def start(update, context):
+# Initialize Flask app
+flask_app = Flask(__name__)
+
+# Initialize Telegram application
+telegram_app = Application.builder().token(TOKEN).build()
+
+# Register module handlers
+timer.register_handlers(telegram_app)
+countdown.register_handlers(telegram_app)
+streak.register_handlers(telegram_app)
+
+# Help command
+def help_text():
+    return (
+        "🤖 *Legalight Study Bot Commands*\n\n"
+        "/help - Show this help message\n"
+        "/task_start `<type>` - Start a task stopwatch\n"
+        "/task_status - Show current task time\n"
+        "/task_pause - Pause current task\n"
+        "/task_resume - Resume paused task\n"
+        "/task_stop - Stop & log task time\n"
+        "/countdown <YYYY-MM-DD> <Event> - Show real-time countdown\n"
+        "/checkin - Record today's study check-in\n"
+        "/mystreak - Show your current streak\n"
+        "/streak_alerts [on|off] - Toggle streak alerts"
+    )
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_markdown(help_text())
+
+# Unknown command handler
+async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Hello! I'm Legalight Study Bot.\n"
-        "Use /help to see available commands."
+        "❓ Sorry, I didn't recognize that command. Use /help to see available commands."
     )
 
-async def help_cmd(update, context):
-    types_str = ', '.join(VALID_TASK_TYPES)
-    await update.message.reply_text(
-        "Available commands:\n"
-        "/task_start <type>  – start a stopwatch task\n"
-        "/task_status       – show your current task time\n"
-        "/task_pause        – pause it\n"
-        "/task_resume       – resume it\n"
-        "/task_stop         – stop & log it\n"
-        "/help              – this message\n\n"
-        "Usage: /task_start <type>\n"
-        f"Valid types: {types_str}"
-    )
+# Register help and fallback handlers
+telegram_app.add_handler(CommandHandler("help", help_command))
+telegram_app.add_handler(MessageHandler(filters.COMMAND, unknown_command))
 
-async def unknown_cmd(update, context):
-    # Catch-all for unsupported commands
-    await update.message.reply_text(
-        "❓ Sorry, I didn't recognize that command. Use /help to see what I can do."
-    )
-
-
-def main():
-    # 1) initialize database tables
-    init_db()
-
-    # 2) load settings
-    token, webhook_url, port = load_config()
-
-    # 3) build the Telegram application
-    app = ApplicationBuilder().token(token).build()
-
-    # 4) register core handlers
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-
-    # 5) register study-task module handlers
-    register_task_handlers(app)
-
-    # 6) catch-all unknown commands (after all others)
-    app.add_handler(MessageHandler(filters.COMMAND, unknown_cmd))
-
-    # 7) start webhook
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        url_path="/webhook",
-        webhook_url=f"{webhook_url}/webhook"
-    )
+# Webhook endpoint
+@flask_app.post("/webhook")
+async def webhook():
+    update = Update.de_json(request.get_json(force=True), telegram_app.bot)
+    await telegram_app.process_update(update)
+    return "OK"
 
 if __name__ == "__main__":
-    main()
+    telegram_app.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.environ.get("PORT", 10000)),
+        url_path="webhook",
+        webhook_url=f"{WEBHOOK_URL}/webhook"
+    )
