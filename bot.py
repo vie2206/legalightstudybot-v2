@@ -1,130 +1,95 @@
 # bot.py
-import asyncio
-import logging
-import os
+import logging, os, asyncio
 from dotenv import load_dotenv
-
 from telegram import BotCommand
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    filters,
-)
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
-# ─────────── local feature modules ───────────
-import database          # database.py  -> init_db()
-import timer             # timer.py     -> register_handlers(app)
-import countdown         # countdown.py -> register_handlers(app)
-import streak            # streak.py    -> register_handlers(app)
-import study_tasks       # study_tasks.py -> register_handlers(app)
+import database, timer, countdown, streak, study_tasks
 
-# ─────────── env / logging ───────────
 load_dotenv()
 BOT_TOKEN    = os.getenv("BOT_TOKEN")
-WEBHOOK_ROOT = os.getenv("WEBHOOK_URL")              # e.g. https://…render.com
-WEBHOOK_PATH = "webhook"                             # relative path
+WEBHOOK_ROOT = os.getenv("WEBHOOK_URL")
+WEBHOOK_PATH = "webhook"
 PORT         = int(os.getenv("PORT", 10000))
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(levelname)s:%(name)s:%(message)s",
-)
+logging.basicConfig(level=logging.INFO,
+                    format="%(levelname)s:%(name)s:%(message)s")
 log = logging.getLogger(__name__)
 
+# ──────────────────────────────────────────────────────────────────────────
+# command-menu we want to push to Telegram clients
+COMMAND_MENU = [
+    BotCommand("start",          "Restart the bot"),
+    BotCommand("help",           "Show help message"),
+    BotCommand("task_start",     "Stop-watch study task"),
+    BotCommand("task_status",    "Show task timer"),
+    BotCommand("task_pause",     "Pause task"),
+    BotCommand("task_resume",    "Resume task"),
+    BotCommand("task_stop",      "Stop & log task"),
+    BotCommand("timer",          "Start Pomodoro"),
+    BotCommand("timer_status",   "Pomodoro status"),
+    BotCommand("timer_pause",    "Pause Pomodoro"),
+    BotCommand("timer_resume",   "Resume Pomodoro"),
+    BotCommand("timer_stop",     "Stop Pomodoro"),
+    BotCommand("countdown",        "Start live countdown"),
+    BotCommand("countdownstatus",  "Countdown status"),
+    BotCommand("countdownstop",    "Cancel countdown"),
+    BotCommand("checkin",        "Record today’s check-in"),
+    BotCommand("mystreak",       "Show study streak"),
+    BotCommand("streak_alerts",  "Toggle streak alerts"),
+]
 
-# ─────────── BUILD APPLICATION ───────────
+# ──────────────────────────────────────────────────────────────────────────
+async def _set_bot_menu(app: Application):
+    await app.bot.set_my_commands(COMMAND_MENU)
+
 def build_app() -> Application:
-    app = Application.builder().token(BOT_TOKEN).build()
+    # register post-init on the *builder*, THEN build
+    builder = (Application.builder()
+               .token(BOT_TOKEN)
+               .post_init(_set_bot_menu))
+    app = builder.build()
 
-    # ── basic /start and /help ────────────────────────────────────────────
-    async def start(update, ctx):
-        await update.message.reply_markdown(
-            "*Welcome to Legalight Study Bot!*\n"
-            "Use /help to see commands."
+    # /start and /help
+    async def start(u, c):
+        await u.message.reply_markdown("*Welcome to Legalight Study Bot!*\nUse /help to see commands.")
+    async def help_(u, c):
+        await u.message.reply_markdown(
+            "*How to use the bot*\n"
+            "• `/task_start MATHS` – begin stopwatch\n"
+            "• `/timer` – pick a Pomodoro preset\n"
+            "• `/countdown 2025-12-31 23:59:59 New Year`\n"
+            "• `/checkin`, `/mystreak`, `/streak_alerts on`\n"
+            "Tap Menu ↓ for the full list."
         )
-
-    async def help_cmd(update, ctx):
-        await update.message.reply_markdown(
-            "*How to use Legalight Study Bot*\n\n"
-            "• `/task_start MATHS` – begin a stopwatch for Maths revision.\n"
-            "  `/task_pause`, `/task_resume`, `/task_stop` control it.\n\n"
-            "• `/timer` – tap a preset (25 | 5, 50 | 10) or choose *Custom*.\n"
-            "  `/timer_status` shows remaining time.\n\n"
-            "• `/countdown 2025-12-31 23:59:59 New Year` – start a live timer.\n\n"
-            "• `/checkin` records today, `/mystreak` shows your streak.\n"
-            "  `/streak_alerts on` – DM if you miss a day.\n\n"
-            "Type `/help` anytime to see this again.",
-            disable_web_page_preview=True,
-        )
-
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help",  help_cmd))
+    app.add_handler(CommandHandler("help",  help_))
 
-    # ── plug-in feature modules ───────────────────────────────────────────
+    # feature sub-modules
     timer.register_handlers(app)
     countdown.register_handlers(app)
     streak.register_handlers(app)
     study_tasks.register_handlers(app)
 
-    # ── fallback: unknown commands ────────────────────────────────────────
-    async def unknown_cmd(update, ctx):
-        await update.message.reply_text(
-            "❓ Sorry, I didn't recognize that command.  Use /help to see the list."
-        )
-    app.add_handler(MessageHandler(filters.COMMAND, unknown_cmd))
-
-    # ── command-menu for Telegram “Menu” button ───────────────────────────
-    commands = [
-        BotCommand("start",          "Restart the bot"),
-        BotCommand("help",           "Show help message"),
-
-        BotCommand("task_start",     "Start a stopwatch study task"),
-        BotCommand("task_status",    "Show task timer"),
-        BotCommand("task_pause",     "Pause the task"),
-        BotCommand("task_resume",    "Resume the task"),
-        BotCommand("task_stop",      "Stop & log the task"),
-
-        BotCommand("timer",          "Start a Pomodoro session"),
-        BotCommand("timer_status",   "Pomodoro status"),
-        BotCommand("timer_pause",    "Pause Pomodoro"),
-        BotCommand("timer_resume",   "Resume Pomodoro"),
-        BotCommand("timer_stop",     "Stop Pomodoro"),
-
-        BotCommand("countdown",        "Start a live countdown"),
-        BotCommand("countdownstatus",  "Countdown status"),
-        BotCommand("countdownstop",    "Cancel countdown"),
-
-        BotCommand("checkin",        "Record today's check-in"),
-        BotCommand("mystreak",       "Show your study streak"),
-        BotCommand("streak_alerts",  "Toggle streak-break alerts"),
-    ]
-
-    async def post_init(app: Application):
-        await app.bot.set_my_commands(commands)
-    app.post_init(post_init)
+    # unknown command fallback
+    async def unknown(u, c):
+        await u.message.reply_text("❓ Unknown command – try /help.")
+    app.add_handler(MessageHandler(filters.COMMAND, unknown))
 
     return app
 
-
-# ─────────── MAIN ENTRY ───────────
+# ──────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # ensure DB tables exist
     database.init_db()
 
     application = build_app()
+    webhook_url = f"{WEBHOOK_ROOT}/{WEBHOOK_PATH}"
+    log.info("Webhook → %s (port %s)", webhook_url, PORT)
 
-    full_webhook = f"{WEBHOOK_ROOT}/{WEBHOOK_PATH}"
-    log.info(
-        "Starting webhook on port %s with path '/%s' → %s",
-        PORT, WEBHOOK_PATH, full_webhook
-    )
-
-    # PTB handles its own asyncio loop
     application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
         url_path=WEBHOOK_PATH,
-        webhook_url=full_webhook,
-        stop_signals=None,            # Render kills container itself
+        webhook_url=webhook_url,
+        stop_signals=None,   # Render stops the container itself
     )
