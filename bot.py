@@ -16,7 +16,7 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. "https://yourapp.onrender.com/web
 PORT        = int(os.getenv("PORT", "10000"))
 
 if not TOKEN or not WEBHOOK_URL:
-    raise RuntimeError("Please set BOT_TOKEN and WEBHOOK_URL in your environment")
+    raise RuntimeError("Please set BOT_TOKEN and WEBHOOK_URL in environment")
 
 # — Logging setup —
 logging.basicConfig(level=logging.INFO)
@@ -54,5 +54,5 @@ if __name__ == "__main__":
     app.run_webhook(
         listen="0.0.0.0",
         port=PORT,
-        path="/webhook",
+        url_path="/webhook",
     )
