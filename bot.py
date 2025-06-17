@@ -1,73 +1,52 @@
 # bot.py
-
 import os
-import logging
 from dotenv import load_dotenv
+from telegram.ext import ApplicationBuilder, CommandHandler
+from database import init_db
+from study_tasks import register_handlers as register_task_handlers
 
-from telegram import Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-)
-
-import timer        # Pomodoro module
-import countdown    # Countdown module
-
-# — Load environment —
 load_dotenv()
-TOKEN       = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://legalightstudybot-docker.onrender.com
 
-# — Logging —
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+BOT_TOKEN   = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").rstrip("/")  # e.g. https://yourapp.onrender.com
+PORT        = int(os.getenv("PORT", "10000"))
 
-# — Core command handlers —
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start(update, context):
     await update.message.reply_text(
-        "👋 Welcome back to LegalightStudyBot!\n"
-        "Use /help to see available commands."
+        "👋 Hello! I'm Legalight Study Bot.\n"
+        "Use /task_start to begin a study task."
     )
 
-async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def help_cmd(update, context):
     await update.message.reply_text(
-        "📚 Commands:\n"
-        "/start — Restart bot\n"
-        "/help — This message\n\n"
-        "⏲️ Pomodoro: /timer <name> <work_min> <break_min>\n"
-        "⏳ Countdown: /countdown YYYY-MM-DD [HH:MM:SS] <label>\n"
+        "Available commands:\n"
+        "/task_start <type>  – start a stopwatch task\n"
+        "/task_status       – show your current task time\n"
+        "/task_pause        – pause it\n"
+        "/task_resume       – resume it\n"
+        "/task_stop         – stop & log it\n"
+        "/help              – this message"
     )
-
-def register_handlers(app: Application):
-    # core
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("help", help_cmd))
-    # feature modules
-    timer.register_handlers(app)
-    countdown.register_handlers(app)
 
 def main():
-    # Build application
-    app = Application.builder().token(TOKEN).build()
-    register_handlers(app)
+    # 1) ensure our tables exist
+    init_db()
 
-    # Webhook settings
-    port     = int(os.environ.get("PORT", 10000))
-    path     = "/webhook"
-    full_url = f"{WEBHOOK_URL}{path}"
+    # 2) build the bot
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    logger.info(
-        "Starting PTB webhook server on port %d, path %r → %s",
-        port, path, full_url
-    )
+    # 3) register core commands
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_cmd))
 
+    # 4) register the study‐task module
+    register_task_handlers(app)
+
+    # 5) run webhook (built-in)
     app.run_webhook(
         listen="0.0.0.0",
-        port=port,
-        url_path=path,
-        webhook_url=full_url,
-        drop_pending_updates=True
+        port=PORT,
+        webhook_url=f"{WEBHOOK_URL}/webhook"
     )
 
 if __name__ == "__main__":
