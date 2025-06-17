@@ -1,196 +1,207 @@
-"""
-study_tasks.py  – stop-watch style study sessions
-
-Usage
-─────
-/task_start <TYPE>     → starts immediately (if TYPE supplied)
-/task_start            → shows inline keyboard of types
-/task_status           → show elapsed / paused
-/task_pause            → pause
-/task_resume           → resume
-/task_stop             → finish & log
-
-The module uses context.user_data to keep per-user state.
-"""
-
-from __future__ import annotations
-
-import time
+# study_tasks.py
+#
+# Stopwatch-style study task tracker with inline-keyboard presets
+# Commands: /task_start, /task_status, /task_pause, /task_resume, /task_stop
+# ──────────────────────────────────────────────────────────────────────────────
+import asyncio, time
 from enum import Enum, auto
-from typing import Final, Dict
+from typing import Dict, Optional
 
 from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
     Update,
+    InlineKeyboardButton as Btn,
+    InlineKeyboardMarkup as Mk,
+    CallbackQuery,
 )
 from telegram.ext import (
-    Application,
-    CallbackQueryHandler,
-    CommandHandler,
     ContextTypes,
+    CommandHandler,
+    CallbackQueryHandler,
     ConversationHandler,
+    MessageHandler,
+    filters,
 )
 
-# ────────────────────────────────────────────────────────────
-class TaskType(str, Enum):
-    CLAT_MOCK        = "CLAT_MOCK"
-    SECTIONAL        = "SECTIONAL"
-    NEWSPAPER        = "NEWSPAPER"
-    EDITORIAL        = "EDITORIAL"
-    GK_CA            = "GK_CA"
-    MATHS            = "MATHS"
-    LEGAL_REASONING  = "LEGAL_REASONING"
-    LOGICAL_REASONING= "LOGICAL_REASONING"
-    CLATOPEDIA       = "CLATOPEDIA"
-    SELF_STUDY       = "SELF_STUDY"
-    ENGLISH          = "ENGLISH"
-    STUDY_TASK       = "STUDY_TASK"
-
-PRESETS: Final[list[TaskType]] = [
-    TaskType.CLAT_MOCK, TaskType.SECTIONAL, TaskType.NEWSPAPER,
-    TaskType.EDITORIAL, TaskType.GK_CA,     TaskType.MATHS,
-    TaskType.LEGAL_REASONING, TaskType.LOGICAL_REASONING,
-    TaskType.CLATOPEDIA,      TaskType.SELF_STUDY,
-    TaskType.ENGLISH,         TaskType.STUDY_TASK,
+# ────────────── preset task types ──────────────
+TASK_TYPES = [
+    "CLAT_MOCK", "SECTIONAL", "NEWSPAPER", "EDITORIAL", "GK_CA", "MATHS",
+    "LEGAL_REASONING", "LOGICAL_REASONING", "CLATOPEDIA", "SELF_STUDY",
+    "ENGLISH", "STUDY_TASK",
 ]
 
-# Conversation state
-CHOOSING = 1
+# ────────────── conversation states ──────────────
+class S(Enum):
+    CHOOSE = auto()
+    CUSTOM = auto()
 
-# ────────────────────────────────────────────────────────────
-def _keyboard() -> InlineKeyboardMarkup:
-    # 3-buttons per row for readability
-    rows, row = [], []
-    for i, t in enumerate(PRESETS, 1):
-        row.append(InlineKeyboardButton(t.replace("_", " ").title(), callback_data=t))
-        if i % 3 == 0:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    return InlineKeyboardMarkup(rows)
+# ────────────── in-memory timers ──────────────
+active_tasks: Dict[int, asyncio.Task]   = {}  # chat_id → asyncio task
+task_meta:    Dict[int, Dict[str, any]] = {}  # chat_id → metadata
 
-# helpers
-def _now() -> float:
-    return time.time()
+# ──────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ──────────────────────────────────────────────────────────────────────────────
+async def _count_loop(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Background coroutine that ticks every second and live-edits the message."""
+    meta = task_meta[chat_id]
+    msg_id: Optional[int] = meta.get("msg_id")
 
-def _human(seconds: float) -> str:
-    m, s = divmod(int(seconds), 60)
-    h, m = divmod(m, 60)
-    if h:
-        return f"{h}h {m}m {s}s"
-    if m:
-        return f"{m}m {s}s"
-    return f"{s}s"
+    try:
+        while True:
+            elapsed = int(time.time() - meta["start"])
+            h, rem  = divmod(elapsed, 3600)
+            m, s    = divmod(rem, 60)
+            txt     = f"⏱️ {meta['type']} • {h:02d}:{m:02d}:{s:02d}"
 
-# ────────────────────────────────────────────────────────────
-async def _begin(update_or_q, context: ContextTypes.DEFAULT_TYPE, ttype: TaskType):
-    """Start a task timer; works for /task_start <type> or callback."""
-    chat_id = update_or_q.effective_chat.id
-    context.user_data["task"] = {
-        "type":       ttype,
-        "start":      _now(),
-        "elapsed":    0.0,
-        "is_paused":  False,
+            if msg_id:
+                try:
+                    await context.bot.edit_message_text(
+                        chat_id, msg_id, txt
+                    )
+                except:  # message might be out of date – ignore
+                    pass
+            await asyncio.sleep(1)
+    except asyncio.CancelledError:
+        pass  # graceful cancel
+
+async def _begin(update_or_q, context: ContextTypes.DEFAULT_TYPE, ttype: str):
+    """Starts (or restarts) a task."""
+    # ── fix: robust chat_id detection for both /task_start and callbacks ──
+    if isinstance(update_or_q, CallbackQuery):
+        chat_id = update_or_q.message.chat_id
+        reply   = update_or_q.message.reply_text
+    else:
+        chat_id = update_or_q.effective_chat.id
+        reply   = update_or_q.message.reply_text
+    # ----------------------------------------------------------------------
+
+    # Cancel existing task if any
+    old = active_tasks.pop(chat_id, None)
+    if old:
+        old.cancel()
+
+    # Send initial message
+    msg = await reply(f"🟢 *{ttype.replace('_', ' ').title()}* started.\n"
+                      "Stopwatch running…\nUse /task_pause or /task_stop.",
+                      parse_mode="Markdown")
+
+    # Track metadata & launch ticker
+    task_meta[chat_id] = {
+        "type":  ttype,
+        "start": time.time(),
+        "msg_id": msg.message_id,
+        "paused": False,
+        "elapsed_before_pause": 0,
     }
-    msg = await context.bot.send_message(
-        chat_id,
-        f"🟢 *{ttype.replace('_', ' ').title()}* started.\n"
-        "Stop-watch running…\n"
-        "Use /task_pause or /task_stop.",
-        parse_mode="Markdown",
-    )
-    # End the conversation (so keyboard disappears)
+    ticker = asyncio.create_task(_count_loop(chat_id, context))
+    active_tasks[chat_id] = ticker
     return ConversationHandler.END
 
-# ────────────────── command callbacks ───────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# Conversation entry: /task_start
 async def task_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """`/task_start [TYPE]` – with type = start, else show chooser."""
-    if context.args:
-        try:
-            ttype = TaskType(context.args[0].upper())
-        except ValueError:
-            return await update.message.reply_text("❌ Invalid type. Use /task_start to pick from the list.")
-        return await _begin(update, context, ttype)
-
-    # No arg → show inline keyboard
+    kbd = [
+        [Btn(t, callback_data=f"TASK:{t}")]
+        for t in TASK_TYPES[:6]
+    ] + [
+        [Btn(t, callback_data=f"TASK:{t}")]
+        for t in TASK_TYPES[6:]
+    ]
     await update.message.reply_text(
-        "Select a study task:",
-        reply_markup=_keyboard(),
+        "Pick a study task:",
+        reply_markup=Mk(kbd)
     )
-    return CHOOSING
+    return S.CHOOSE
 
 async def preset_chosen(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    ttype  = TaskType(query.data)
+
+    if not query.data.startswith("TASK:"):
+        return ConversationHandler.END
+    _, ttype = query.data.split(":", maxsplit=1)
     return await _begin(query, context, ttype)
 
-async def task_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    task = context.user_data.get("task")
-    if not task:
-        return await update.message.reply_text("ℹ️ No active task.")
-    elapsed = task["elapsed"]
-    if not task["is_paused"]:
-        elapsed += _now() - task["start"]
-    await update.message.reply_text(
-        f"⏱️ {_human(elapsed)} elapsed on {task['type'].replace('_', ' ').title()}"
-        + (" (paused)" if task["is_paused"] else "")
-    )
-
+# ──────────────────────────────────────────────────────────────────────────────
+# Pause / resume / stop / status
 async def task_pause(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    task = context.user_data.get("task")
-    if not task or task["is_paused"]:
-        return await update.message.reply_text("ℹ️ No running task to pause.")
-    task["elapsed"] += _now() - task["start"]
-    task["is_paused"] = True
-    await update.message.reply_text("⏸️ Paused.")
+    chat_id = update.effective_chat.id
+    ticker  = active_tasks.pop(chat_id, None)
+    meta    = task_meta.get(chat_id)
+
+    if not ticker or not meta or meta["paused"]:
+        return await update.message.reply_text("ℹ️ No active task to pause.")
+
+    ticker.cancel()
+    meta["paused"] = True
+    meta["elapsed_before_pause"] += time.time() - meta["start"]
+    await update.message.reply_text("⏸️ Task paused. Use /task_resume.")
 
 async def task_resume(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    task = context.user_data.get("task")
-    if not task or not task["is_paused"]:
+    chat_id = update.effective_chat.id
+    meta    = task_meta.get(chat_id)
+
+    if not meta or not meta.get("paused"):
         return await update.message.reply_text("ℹ️ No paused task to resume.")
-    task["start"] = _now()
-    task["is_paused"] = False
-    await update.message.reply_text("▶️ Resumed.")
+
+    meta["paused"] = False
+    meta["start"]  = time.time()
+    ticker         = asyncio.create_task(_count_loop(chat_id, context))
+    active_tasks[chat_id] = ticker
+    await update.message.reply_text("▶️ Task resumed.")
 
 async def task_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    task = context.user_data.pop("task", None)
-    if not task:
-        return await update.message.reply_text("ℹ️ No task to stop.")
-    total = task["elapsed"]
-    if not task["is_paused"]:
-        total += _now() - task["start"]
-    await update.message.reply_text(
-        f"✅ Logged {_human(total)} on {task['type'].replace('_', ' ').title()}."
-    )
-    # TODO: store to DB for streaks / summaries
+    chat_id = update.effective_chat.id
+    ticker  = active_tasks.pop(chat_id, None)
+    meta    = task_meta.pop(chat_id, None)
 
-# ────────────────── registration helper ─────────────────────
-def register_handlers(app: Application):
+    if ticker:
+        ticker.cancel()
+
+    if not meta:
+        return await update.message.reply_text("ℹ️ No active task.")
+
+    elapsed = int(time.time() - meta["start"]) + int(meta["elapsed_before_pause"])
+    h, rem  = divmod(elapsed, 3600)
+    m, s    = divmod(rem, 60)
+    await update.message.reply_text(
+        f"✅ Logged *{meta['type']}* – {h:02d}:{m:02d}:{s:02d}",
+        parse_mode="Markdown"
+    )
+
+async def task_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat_id = update.effective_chat.id
+    meta    = task_meta.get(chat_id)
+
+    if not meta:
+        return await update.message.reply_text("ℹ️ No task running.")
+
+    if meta["paused"]:
+        elapsed = int(meta["elapsed_before_pause"])
+    else:
+        elapsed = int(time.time() - meta["start"]) + int(meta["elapsed_before_pause"])
+
+    h, rem = divmod(elapsed, 3600)
+    m, s   = divmod(rem, 60)
+    await update.message.reply_text(
+        f"⏱️ {meta['type']} – {h:02d}:{m:02d}:{s:02d}"
+    )
+
+# ──────────────────────────────────────────────────────────────────────────────
+def register_handlers(app):
+    # Conversation for picking preset
     wizard = ConversationHandler(
         entry_points=[CommandHandler("task_start", task_start)],
         states={
-            CHOOSING: [
-                CallbackQueryHandler(preset_chosen),
-                # allow these even while keyboard is open
-                CommandHandler("task_start",  task_start),
-                CommandHandler("task_pause",  task_pause),
-                CommandHandler("task_resume", task_resume),
-                CommandHandler("task_stop",   task_stop),
-                CommandHandler("task_status", task_status),
-            ],
+            S.CHOOSE: [CallbackQueryHandler(preset_chosen, pattern=r"^TASK:")],
         },
-        fallbacks=[],
-        per_chat=True,
-        per_user=True,
-        per_message=False,
-        allow_reentry=True,           # re-issue /task_start any time
+        fallbacks=[MessageHandler(filters.Regex("/cancel"), lambda u, c: ConversationHandler.END)],
+        per_message=True,
     )
-
     app.add_handler(wizard)
-    app.add_handler(CommandHandler("task_status", task_status))
-    app.add_handler(CommandHandler("task_pause",  task_pause))
-    app.add_handler(CommandHandler("task_resume", task_resume))
-    app.add_handler(CommandHandler("task_stop",   task_stop))
+
+    # Stand-alone commands
+    app.add_handler(CommandHandler("task_pause",   task_pause))
+    app.add_handler(CommandHandler("task_resume",  task_resume))
+    app.add_handler(CommandHandler("task_stop",    task_stop))
+    app.add_handler(CommandHandler("task_status",  task_status))
