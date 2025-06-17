@@ -1,21 +1,16 @@
 # bot.py
-import logging, os
+import logging, os, re                     # ← added re
 from dotenv import load_dotenv
-
 from telegram import BotCommand
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
-    filters,          # ← we forgot this line last time
+    filters,
 )
 
 # ────────── local modules ──────────
-import database
-import timer
-import countdown
-import streak
-import study_tasks
+import database, timer, countdown, streak, study_tasks
 
 # ────────── env / logging ──────────
 load_dotenv()
@@ -28,7 +23,7 @@ logging.basicConfig(level=logging.INFO,
                     format="%(levelname)s | %(name)s | %(message)s")
 log = logging.getLogger(__name__)
 
-# ────────── Telegram command-menu ──────────
+# ────────── Telegram menu ──────────
 COMMAND_MENU = [
     BotCommand("start",          "Restart the bot"),
     BotCommand("help",           "Show help message"),
@@ -42,52 +37,51 @@ COMMAND_MENU = [
     BotCommand("timer_pause",    "Pause Pomodoro"),
     BotCommand("timer_resume",   "Resume Pomodoro"),
     BotCommand("timer_stop",     "Stop Pomodoro"),
-    BotCommand("countdown",        "Start live countdown"),
-    BotCommand("countdownstatus",  "Countdown status"),
-    BotCommand("countdownstop",    "Cancel countdown"),
+    BotCommand("countdown",      "Start live countdown"),
     BotCommand("checkin",        "Record today’s check-in"),
     BotCommand("mystreak",       "Show study streak"),
     BotCommand("streak_alerts",  "Toggle streak alerts"),
 ]
-KNOWN_CMDS = [c.command for c in COMMAND_MENU]
+KNOWN_CMDS = [cmd.command for cmd in COMMAND_MENU]
 
 # ────────── build PTB app ──────────
 async def _set_bot_menu(app: Application):
     await app.bot.set_my_commands(COMMAND_MENU)
 
 def build_app() -> Application:
-    builder = (
+    app = (
         Application.builder()
         .token(BOT_TOKEN)
-        .post_init(_set_bot_menu)      # add menu after start-up
+        .post_init(_set_bot_menu)
+        .build()
     )
-    app = builder.build()
 
-    # /start  &  /help
+    # /start & /help
     async def _start(u, c):
         await u.message.reply_markdown(
-            "*Welcome to Legalight Study Bot!*  Use /help to see commands."
+            "*Welcome to Legalight Study Bot!*\nUse /help to see commands."
         )
     async def _help(u, c):
         await u.message.reply_markdown(
-            "*How to use the bot*\n"
+            "*Quick guide*\n"
             "• `/task_start MATHS` – begin stopwatch\n"
             "• `/timer` – pick a Pomodoro preset\n"
             "• `/countdown 2025-12-31 23:59:59 New Year`\n"
             "• `/checkin`, `/mystreak`, `/streak_alerts on`\n"
-            "Tap Menu ↓ for the full list."
+            "Tap the Menu (📋) for full list."
         )
     app.add_handler(CommandHandler("start", _start))
     app.add_handler(CommandHandler("help",  _help))
 
-    # plug-in feature modules
+    # feature modules
     timer.register_handlers(app)
     countdown.register_handlers(app)
     streak.register_handlers(app)
     study_tasks.register_handlers(app)
 
-    # unknown commands (anything not in KNOWN_CMDS)
-    unknown_filter = filters.COMMAND & (~filters.Regex(rf"^/({'|'.join(KNOWN_CMDS)})"))
+    # anything not in our known list → “unknown”
+    escaped = "|".join(map(re.escape, KNOWN_CMDS))
+    unknown_filter = filters.COMMAND & (~filters.Regex(rf"^/({escaped})(?:@[\w_]+)?($|\s)"))
     async def _unknown(u, c):
         await u.message.reply_text("❓ Unknown command – type /help.")
     app.add_handler(MessageHandler(unknown_filter, _unknown))
@@ -100,12 +94,12 @@ if __name__ == "__main__":
 
     application = build_app()
     webhook_url = f"{WEBHOOK_ROOT}/{WEBHOOK_PATH}"
-    log.info("Webhook → %s (port %s)", webhook_url, PORT)
+    log.info("Webhook → %s  (port %s)", webhook_url, PORT)
 
     application.run_webhook(
         listen="0.0.0.0",
         port=PORT,
         url_path=WEBHOOK_PATH,
         webhook_url=webhook_url,
-        stop_signals=None,   # Render stops the container itself
+        stop_signals=None,     # Render stops the container itself
     )
