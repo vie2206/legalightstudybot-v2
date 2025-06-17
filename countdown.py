@@ -1,20 +1,22 @@
-# countdown.py
 """
-Live event-countdown with optional pin:
+Live event countdown with optional pin.
 
+Workflow
+========
   /countdown  → wizard asks
-      1) Date  (YYYY-MM-DD)
-      2) Time  (HH:MM:SS or 'now')
-      3) Label (max 60 chars)
-      4) Pin?  ✅/❌
-  The bot then posts (and maybe pins) a message that updates every second.
+      1️⃣  Date  (YYYY-MM-DD)
+      2️⃣  Time  (HH:MM:SS or “now” = 00:00:00)
+      3️⃣  Label (≤ 60 chars)
+      4️⃣  Pin?  (Yes / No)
 
-Extra commands
---------------
+The bot edits a single message every second until the deadline.
+Commands
+--------
 /countdownstatus   – show remaining once
-/countdownstop     – cancel the live countdown
+/countdownstop     – cancel the active countdown
 """
 
+from __future__ import annotations
 import asyncio
 import datetime as dt
 from typing import Dict
@@ -34,164 +36,173 @@ from telegram.ext import (
     filters,
 )
 
+# ──────────────────────────────────────────────────────────────
 ASK_DATE, ASK_TIME, ASK_LABEL, ASK_PIN = range(4)
 
-# per-chat state
-meta:  Dict[int, dict]     = {}        # chat_id → {target, label, msg_id, pinned}
-tasks: Dict[int, asyncio.Task] = {}    # chat_id → asyncio task
+meta:  Dict[int, dict]      = {}     # chat_id → {target,label,msg_id}
+tasks: Dict[int, asyncio.Task] = {}  # chat_id → background asyncio.Task
 
-
-# ───────────────────────── helpers
-def _parse_date(s: str):
-    try: return dt.date.fromisoformat(s)
-    except ValueError: return None
-
-
-def _parse_time(s: str):
-    if s.lower() == "now":
-        return dt.time(0, 0, 0)
-    try: return dt.time.fromisoformat(s)
-    except ValueError: return None
-
-
-async def _edit(chat_id: int, bot):
-    """Return True while still counting down; False when finished."""
-    m = meta[chat_id]
-    remaining = m["target"] - dt.datetime.utcnow()
-    if remaining.total_seconds() <= 0:
-        txt = f"🎉 *{m['label']}* reached!"
-        try:
-            await bot.edit_message_text(
-                chat_id, m["msg_id"], text=txt, parse_mode="Markdown"
-            )
-        except: pass
-        return False
-
-    days = remaining.days
-    hrs, rem = divmod(remaining.seconds, 3600)
-    mins, secs = divmod(rem, 60)
-    txt = (
-        f"⏳ *{m['label']}*\n"
-        f"{days}d {hrs}h {mins}m {secs}s remaining."
-    )
+# ──────────────────────────────────────────────────────────────
+def _parse_date(txt: str) -> dt.date | None:
     try:
-        await bot.edit_message_text(
-            chat_id, m["msg_id"], text=txt, parse_mode="Markdown"
-        )
-    except:  # message might have been deleted/unpinned
-        return False
-    return True
+        return dt.date.fromisoformat(txt)
+    except ValueError:
+        return None
 
 
-def _launch(chat_id: int, ctx: ContextTypes.DEFAULT_TYPE):
-    async def loop():
-        try:
-            while await _edit(chat_id, ctx.bot):
-                await asyncio.sleep(1)          # update every second
-        finally:
-            tasks.pop(chat_id, None)
-            meta.pop(chat_id,  None)
-
-    tasks[chat_id] = asyncio.create_task(loop())
+def _parse_time(txt: str) -> dt.time | None:
+    if txt.lower() == "now":
+        return dt.time(0, 0, 0)
+    try:
+        return dt.time.fromisoformat(txt)
+    except ValueError:
+        return None
 
 
-# ───────────────────────── wizard handlers
-async def w_start(update: Update, _):
-    await update.message.reply_text("📅 Target *date*? (YYYY-MM-DD)", parse_mode="Markdown")
+# ─────────────────── wizard steps ─────────────────────────────
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text(
+        "📅 Target *date*? (YYYY-MM-DD)", parse_mode="Markdown"
+    )
     return ASK_DATE
 
 
-async def w_date(update: Update, ctx):
+async def got_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     d = _parse_date(update.message.text.strip())
     if not d:
-        return await update.message.reply_text("❌ Invalid date. Try again.") or ASK_DATE
-    ctx.user_data["d"] = d
-    await update.message.reply_text("⏰ Target *time*? (HH:MM:SS or `now`)", parse_mode="Markdown")
+        await update.message.reply_text("❌ Invalid date. Try again (YYYY-MM-DD).")
+        return ASK_DATE
+    ctx.user_data["date"] = d
+    await update.message.reply_text(
+        "⏰ Target *time*? (HH:MM:SS or `now` = 00:00:00)", parse_mode="Markdown"
+    )
     return ASK_TIME
 
 
-async def w_time(update: Update, ctx):
+async def got_time(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     t = _parse_time(update.message.text.strip())
     if t is None:
-        return await update.message.reply_text("❌ Invalid time. Try again.") or ASK_TIME
-    ctx.user_data["t"] = t
-    await update.message.reply_text("🏷  Event label?")
+        await update.message.reply_text("❌ Invalid time. Try again.")
+        return ASK_TIME
+    ctx.user_data["time"] = t
+    await update.message.reply_text(
+        "🏷  Label this event (e.g. *Exam Day*):", parse_mode="Markdown"
+    )
     return ASK_LABEL
 
 
-async def w_label(update: Update, ctx):
+async def got_label(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
     ctx.user_data["label"] = update.message.text.strip()[:60]
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("📌 Pin", callback_data="pin_yes"),
-         InlineKeyboardButton("Skip",  callback_data="pin_no")]
-    ])
-    await update.message.reply_text("Pin the live countdown message?", reply_markup=kb)
+    kb = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("📌 Pin", callback_data="pin_yes"),
+          InlineKeyboardButton("Skip",  callback_data="pin_no")]]
+    )
+    await update.message.reply_text("Pin countdown message?", reply_markup=kb)
     return ASK_PIN
 
 
-async def w_pin(update: Update, ctx):
-    q   = update.callback_query
-    cid = q.message.chat.id
+async def pin_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    q      = update.callback_query
     await q.answer()
-    pin = (q.data == "pin_yes")
+    pin_it = q.data == "pin_yes"
 
-    # build target datetime
-    d, t = ctx.user_data["d"], ctx.user_data["t"]
-    target = dt.datetime.combine(d, t)
+    date   = ctx.user_data["date"]
+    time_  = ctx.user_data["time"]
+    label  = ctx.user_data["label"]
+    target = dt.datetime.combine(date, time_)
 
-    # cancel previous
-    if tsk := tasks.pop(cid, None):
-        tsk.cancel()
+    cid = q.message.chat.id
+    # cancel old task if present
+    old = tasks.pop(cid, None)
+    if old:
+        old.cancel()
 
-    # post initial message
-    msg = await q.message.reply_text("⏳ Starting countdown…")
-    if pin:
-        try: await q.bot.pin_chat_message(cid, msg.message_id, disable_notification=True)
-        except: pass
+    msg = await q.edit_message_text("⏳ Starting countdown…")
+    if pin_it:
+        try:
+            await q.message.chat.pin_message(msg.message_id, disable_notification=True)
+        except Exception:
+            pass  # ignore pin errors (no rights etc.)
 
-    meta[cid] = {
-        "target": target,
-        "label":  ctx.user_data["label"],
-        "msg_id": msg.message_id,
-        "pinned": pin,
-    }
+    meta[cid] = {"target": target, "label": label, "msg_id": msg.message_id}
     _launch(cid, ctx)
-    await q.message.delete()   # remove the wizard’s “Pin?” question
     return ConversationHandler.END
 
 
-async def cancel(update: Update, _):
-    await update.message.reply_text("Countdown wizard cancelled.")
+async def cancel(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    await update.message.reply_text("Countdown cancelled.")
     return ConversationHandler.END
 
 
-# ───────────────────────── standalone cmds
-async def status(update: Update, ctx):
+# ─────────────────── live-update helpers ──────────────────────
+async def status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     cid = update.effective_chat.id
     if cid not in meta:
         return await update.message.reply_text("ℹ️ No active countdown.")
     await _edit(cid, ctx.bot)
 
 
-async def stop(update: Update, _):
+async def stop(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     cid = update.effective_chat.id
-    if t := tasks.pop(cid, None):
+    t   = tasks.pop(cid, None)
+    if t:
         t.cancel()
-    if m := meta.pop(cid, None):
-        try: await _.bot.unpin_chat_message(cid, m["msg_id"])
-        except: pass
+    meta.pop(cid, None)
     await update.message.reply_text("🚫 Countdown cancelled.")
 
 
-# ───────────────────────── registration
+async def _edit(cid: int, bot) -> bool:
+    m = meta[cid]
+    now = dt.datetime.utcnow()
+    left = m["target"] - now
+    if left.total_seconds() <= 0:
+        txt = f"🎉 {m['label']} reached!"
+        try:
+            await bot.edit_message_text(cid, m["msg_id"], text=txt)
+        except Exception:
+            pass
+        return False
+
+    days  = left.days
+    hrs, rem = divmod(left.seconds, 3600)
+    mins, secs = divmod(rem, 60)
+    txt = (
+        f"⏳ *{m['label']}*\n"
+        f"{days} d {hrs:02} h {mins:02} m {secs:02} s remaining."
+    )
+    try:
+        await bot.edit_message_text(cid, m["msg_id"], text=txt, parse_mode="Markdown")
+    except Exception as e:
+        # ignore harmless “message is not modified” errors
+        if "message is not modified" not in str(e).lower():
+            raise
+    return True
+
+
+def _launch(cid: int, ctx: ContextTypes.DEFAULT_TYPE):
+    async def loop():
+        try:
+            # immediate first tick
+            while await _edit(cid, ctx.bot):
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            pass
+        finally:
+            tasks.pop(cid, None)
+            meta.pop(cid,  None)
+
+    tasks[cid] = ctx.application.create_task(loop())
+
+
+# ─────────────────── wiring into the bot ──────────────────────
 def register_handlers(app: Application):
     conv = ConversationHandler(
-        entry_points=[CommandHandler("countdown", w_start)],
+        entry_points=[CommandHandler("countdown", start)],
         states={
-            ASK_DATE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, w_date)],
-            ASK_TIME:  [MessageHandler(filters.TEXT & ~filters.COMMAND, w_time)],
-            ASK_LABEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, w_label)],
-            ASK_PIN:   [CallbackQueryHandler(w_pin, pattern="^pin_")],
+            ASK_DATE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, got_date)],
+            ASK_TIME:  [MessageHandler(filters.TEXT & ~filters.COMMAND, got_time)],
+            ASK_LABEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, got_label)],
+            ASK_PIN:   [CallbackQueryHandler(pin_choice, pattern="^pin_")],
         },
         fallbacks=[CommandHandler("cancel", cancel)],
         per_chat=True,
