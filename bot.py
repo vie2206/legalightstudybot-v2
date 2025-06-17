@@ -17,9 +17,10 @@ from dotenv import load_dotenv
 
 # ─── Load env & configure logging ───────────────────────────────────────────────
 load_dotenv()
-TOKEN       = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://yourapp.onrender.com
-PORT        = int(os.getenv("PORT", "10000"))
+TOKEN = os.getenv("BOT_TOKEN")
+# WEBHOOK_URL should include the '/webhook' suffix
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # e.g. https://yourapp.onrender.com/webhook
+PORT = int(os.getenv("PORT", "10000"))
 
 if not TOKEN or not WEBHOOK_URL:
     raise RuntimeError("BOT_TOKEN and WEBHOOK_URL must be set in your environment")
@@ -39,13 +40,12 @@ async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📚 *Commands:*\n"
         "/start — Restart the bot\n"
         "/help  — Show this message\n\n"
-        "⏲️ *Pomodoro* (/timer …)\n"
-        "📅 *Countdown* (/countdown …)\n"
+        "⏲️ *Pomodoro Timer* (/timer …)\n"
+        "📅 *Countdown* (/countdown …)",
     )
 
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❓ Unknown command. Try /help.")
-
 
 # ─── Main application setup & webhook launch ──────────────────────────────────
 async def main():
@@ -88,11 +88,11 @@ async def main():
         listen="0.0.0.0",
         port=PORT,
         url_path="webhook",
-        webhook_url=f"{WEBHOOK_URL}/webhook",
+        webhook_url=WEBHOOK_URL,   # uses your env var including '/webhook'
     )
-    logger.info(f"✅ Webhook set to {WEBHOOK_URL}/webhook")
+    logger.info(f"✅ Webhook set to {WEBHOOK_URL}")
 
-    # 8) Idle until Ctrl-C or termination
+    # 8) Idle until termination
     await app.updater.idle()
 
 if __name__ == "__main__":
