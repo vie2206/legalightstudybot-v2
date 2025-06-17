@@ -2,18 +2,11 @@
 """
 Daily study-streak tracker.
 
-Features
+Commands
 --------
-/checkin        – record “I studied today!”
-/mystreak       – show consecutive-day streak
-/streak_alerts  – toggle DM alert if the streak breaks
-
-Implementation
---------------
-•  Streak data kept in a simple in-memory dict  {user_id: {...}}.
-   (You can later swap this out for a DB; the interface is isolated.)
-•  A background task runs every hour to detect broken streaks and
-   DM users who enabled alerts.
+/checkin         – record “I studied today!”
+/mystreak        – show consecutive-day streak
+/streak_alerts   – toggle DM alert if the streak breaks
 """
 
 import asyncio
@@ -27,7 +20,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# ──────────────────────────────────────────────────────────────
+# ────────────────────────── internal data model
 class _Streak:
     __slots__ = ("days", "last_date", "alerts_on")
 
@@ -37,26 +30,27 @@ class _Streak:
         self.alerts_on: bool = True
 
 
-streaks: Dict[int, _Streak] = {}   # key = telegram user_id
+_streaks: Dict[int, _Streak] = {}  # user_id ➜ _Streak
 
+# ────────────────────────── helpers
+def _today() -> dt.date:
+    """Return today’s date (UTC)."""
+    return dt.datetime.utcnow().date()
 
-# ──────────────────────────────────────────────────────────────
-async def checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """User manually records study for today."""
-    uid = update.effective_user.id
-    today = dt.date.today()
+# ────────────────────────── command handlers
+async def checkin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid   = update.effective_user.id
+    today = _today()
 
-    s = streaks.setdefault(uid, _Streak())
+    s = _streaks.setdefault(uid, _Streak())
 
-    # same day?
     if s.last_date == today:
-        return await update.message.reply_text("✅ Already checked in for today!")
+        return await update.message.reply_text("✅ Already checked-in today!")
 
-    # consecutive?
     if s.last_date and (today - s.last_date).days == 1:
-        s.days += 1
+        s.days += 1          # consecutive
     else:
-        s.days = 1  # reset
+        s.days = 1           # reset
 
     s.last_date = today
     await update.message.reply_text(
@@ -65,69 +59,55 @@ async def checkin(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def mystreak(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show the user’s current streak."""
+async def mystreak(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    s = streaks.get(uid)
-    if not s or not s.last_date:
-        return await update.message.reply_text("You haven’t checked in yet. Use /checkin!")
+    s   = _streaks.get(uid)
 
-    days = s.days
-    last = s.last_date.strftime("%Y-%m-%d")
+    if not s or not s.last_date:
+        return await update.message.reply_text("No streak yet – use /checkin!")
+
     await update.message.reply_text(
-        f"🔥 You’re on a *{days}-day* streak (last check-in: {last}).",
+        f"🔥 You’re on a *{s.days}-day* streak "
+        f"(last check-in: {s.last_date.isoformat()}).",
         parse_mode="Markdown",
     )
 
 
-async def streak_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/streak_alerts on|off  – toggle DM alert."""
+async def streak_alerts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    arg = (context.args[0].lower() if context.args else "")
-    if arg not in ("on", "off"):
+    if not ctx.args or ctx.args[0].lower() not in ("on", "off"):
         return await update.message.reply_text("Usage: /streak_alerts on|off")
 
-    s = streaks.setdefault(uid, _Streak())
-    s.alerts_on = (arg == "on")
+    enable = ctx.args[0].lower() == "on"
+    _streaks.setdefault(uid, _Streak()).alerts_on = enable
     await update.message.reply_text(
-        f"🔔 Break-streak alerts are now *{'ON' if s.alerts_on else 'OFF'}*.",
+        f"🔔 Break-streak alerts are now *{'ON' if enable else 'OFF'}*.",
         parse_mode="Markdown",
     )
 
-
-# ──────────────────────────────────────────────────────────────
+# ────────────────────────── background loop
 async def _hourly_checker(bot):
-    """Background loop: DM users whose streak just broke."""
     while True:
-        now = dt.datetime.now()
-        today = now.date()
-
-        for uid, s in list(streaks.items()):
-            if not s.alerts_on or not s.last_date:
-                continue
-            # missed yesterday?
-            if (today - s.last_date).days >= 2:
+        today = _today()
+        for uid, s in list(_streaks.items()):
+            if s.alerts_on and s.last_date and (today - s.last_date).days >= 2:
                 try:
                     await bot.send_message(
                         uid,
-                        "⚠️ You missed a day and your study streak reset. "
-                        "Jump back in with /checkin!",
+                        "⚠️ You missed a day – your streak reset. "
+                        "Get back on track with /checkin!",
                     )
                 except Exception:
-                    pass   # user may have blocked bot
-                s.alerts_on = False  # stop spamming until they re-enable
-
-        # wait 1 h
+                    pass          # user blocked bot / cannot DM
+                s.alerts_on = False
         await asyncio.sleep(3600)
 
-
-# ──────────────────────────────────────────────────────────────
+# ────────────────────────── registration helper
 def register_handlers(app: Application):
     app.add_handler(CommandHandler("checkin",        checkin))
     app.add_handler(CommandHandler("mystreak",       mystreak))
     app.add_handler(CommandHandler("streak_alerts",  streak_alerts))
 
-    # Launch background checker once the bot is up
     async def _post_init(app: Application):
         app.create_task(_hourly_checker(app.bot))
 
