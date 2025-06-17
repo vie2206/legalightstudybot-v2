@@ -7,7 +7,7 @@ from telegram.ext import ContextTypes, CommandHandler
 
 # In‐memory storage for active timers and metadata
 active_timers: Dict[int, asyncio.Task] = {}
-timer_info: Dict[int, Dict[str, float]] = {}
+timer_info:   Dict[int, Dict[str, float]] = {}
 
 async def timer_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
@@ -15,7 +15,7 @@ async def timer_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Starts a Pomodoro with an in‐place live countdown.
     """
     chat_id = update.effective_chat.id
-    args = context.args or []
+    args    = context.args or []
 
     # Parse durations (defaults: 25 work / 5 break)
     try:
@@ -117,7 +117,7 @@ async def timer_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def timer_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Stops and cancels the active Pomodoro timer."""
     chat_id = update.effective_chat.id
-    task = active_timers.pop(chat_id, None)
+    task    = active_timers.pop(chat_id, None)
     timer_info.pop(chat_id, None)
     if task:
         task.cancel()
@@ -128,7 +128,7 @@ async def timer_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def timer_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Reports remaining time for the active Pomodoro phase."""
     chat_id = update.effective_chat.id
-    info = timer_info.get(chat_id)
+    info    = timer_info.get(chat_id)
     if not info:
         return await update.message.reply_text("ℹ️ No active Pomodoro.")
 
@@ -140,6 +140,6 @@ async def timer_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 def register_handlers(app):
     """Wire up timer commands onto your Application."""
-    app.add_handler(CommandHandler("timer", timer_start))
-    app.add_handler(CommandHandler("timer_stop", timer_stop))
-    app.add_handler(CommandHandler("timer_status", timer_status))
+    app.add_handler(CommandHandler("timer",         timer_start))
+    app.add_handler(CommandHandler("timer_stop",    timer_stop))
+    app.add_handler(CommandHandler("timer_status",  timer_status))
