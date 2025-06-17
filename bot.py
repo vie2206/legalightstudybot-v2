@@ -8,21 +8,17 @@ from telegram.ext import (
     filters
 )
 from database import init_db
-from study_tasks import register_handlers as register_task_handlers
+from study_tasks import register_handlers as register_task_handlers, VALID_TASK_TYPES
 
-# Load environment
-load_dotenv()
-
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").rstrip("/")  # e.g. https://yourapp.onrender.com
-PORT = int(os.getenv("PORT", "10000"))
-
-# Valid study task types for /task_start
-VALID_TASK_TYPES = [
-    'CLAT_MOCK', 'SECTIONAL', 'NEWSPAPER', 'EDITORIAL', 'GK_CA', 'MATHS',
-    'LEGAL_REASONING', 'LOGICAL_REASONING', 'CLATOPEDIA', 'SELF_STUDY',
-    'ENGLISH', 'STUDY_TASK'
-]
+# Load environment variables
+def load_config():
+    load_dotenv()
+    token = os.getenv("BOT_TOKEN")
+    webhook = os.getenv("WEBHOOK_URL", "").rstrip("/")
+    port = int(os.getenv("PORT", "10000"))
+    if not token or not webhook:
+        raise RuntimeError("BOT_TOKEN and WEBHOOK_URL must be set in environment.")
+    return token, webhook, port
 
 async def start(update, context):
     await update.message.reply_text(
@@ -50,29 +46,33 @@ async def unknown_cmd(update, context):
         "❓ Sorry, I didn't recognize that command. Use /help to see what I can do."
     )
 
+
 def main():
-    # 1) ensure our database tables exist
+    # 1) initialize database tables
     init_db()
 
-    # 2) build the Telegram application
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    # 2) load settings
+    token, webhook_url, port = load_config()
 
-    # 3) register core commands
+    # 3) build the Telegram application
+    app = ApplicationBuilder().token(token).build()
+
+    # 4) register core handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
 
-    # 4) register the study-task module handlers (must come before unknown)
+    # 5) register study-task module handlers
     register_task_handlers(app)
 
-    # 5) catch-all for unknown slash commands (after all others)
+    # 6) catch-all unknown commands (after all others)
     app.add_handler(MessageHandler(filters.COMMAND, unknown_cmd))
 
-    # 6) launch via webhook
+    # 7) start webhook
     app.run_webhook(
         listen="0.0.0.0",
-        port=PORT,
+        port=port,
         url_path="/webhook",
-        webhook_url=f"{WEBHOOK_URL}/webhook"
+        webhook_url=f"{webhook_url}/webhook"
     )
 
 if __name__ == "__main__":
