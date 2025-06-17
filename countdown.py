@@ -1,153 +1,87 @@
-import asyncio
-from datetime import datetime, timedelta
-from typing import Dict
+"""
+Date-time countdown module.
 
+Commands
+--------
+/countdown_set <YYYY-MM-DD HH:MM> <event>
+/countdown_show
+/countdown_clear
+"""
+from __future__ import annotations
+import re
+from datetime import datetime, timezone
+from typing import Dict, Tuple, Optional
 from telegram import Update
-from telegram.ext import ContextTypes, CommandHandler
+from telegram.ext import ContextTypes, Application, CommandHandler
 
-# In‐memory stores for active countdowns
-active_tasks: Dict[int, asyncio.Task] = {}
-info_store:   Dict[int, Dict]         = {}
-
-# Date/time formats
-DATE_FMT = "%Y-%m-%d"
-TIME_FMT = "%H:%M:%S"
+# chat_id → (deadline (UTC dt), title)
+_countdowns: Dict[int, Tuple[datetime, str]] = {}
 
 
-async def countdown_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    args    = context.args or []
-
-    # pin flag?
-    pin = False
-    if "--pin" in args:
-        pin = True
-        args.remove("--pin")
-
-    # need at least date + label
-    if len(args) < 2:
-        return await update.message.reply_text(
-            "❌ Usage: /countdown <YYYY-MM-DD> [HH:MM:SS] <label> [--pin]"
-        )
-
-    # parse date
+def _parse_dt(text: str) -> Optional[datetime]:
+    m = re.match(r"(\\d{4}-\\d{2}-\\d{2})(?:\\s+(\\d{2}:\\d{2}))?", text)
+    if not m:
+        return None
+    date_part, time_part = m.groups()
+    time_part = time_part or "00:00"
     try:
-        base = datetime.strptime(args[0], DATE_FMT)
+        dt = datetime.strptime(f"{date_part} {time_part}", "%Y-%m-%d %H:%M")
+        return dt.replace(tzinfo=timezone.utc)
     except ValueError:
-        return await update.message.reply_text("❌ Date must be YYYY-MM-DD")
-
-    # parse optional time
-    if ":" in args[1]:
-        try:
-            t = datetime.strptime(args[1], TIME_FMT).time()
-            target = datetime.combine(base.date(), t)
-            label  = " ".join(args[2:]).strip() or "Event"
-        except ValueError:
-            return await update.message.reply_text("❌ Time must be HH:MM:SS")
-    else:
-        target = datetime.combine(base.date(), datetime.min.time())
-        label  = " ".join(args[1:]).strip() or "Event"
-
-    # cancel any existing countdown in this chat
-    if chat_id in active_tasks:
-        active_tasks[chat_id].cancel()
-
-    # store meta
-    info_store[chat_id] = {
-        "target": target,
-        "label":  label,
-        "pin":    pin,
-        "msg_id": None,
-    }
-
-    # 1️⃣ Immediate acknowledgement (becomes our live ticker)
-    msg = await update.message.reply_text(
-        f"⏳ Countdown to '{label}' at {target:%Y-%m-%d %H:%M:%S} started."
-    )
-    if pin:
-        try:
-            await context.bot.pin_chat_message(chat_id, msg.message_id)
-        except:
-            pass
-
-    info_store[chat_id]["msg_id"] = msg.message_id
-
-    # fire off the per-second ticker
-    active_tasks[chat_id] = asyncio.create_task(_ticker(chat_id, context))
+        return None
 
 
-async def countdown_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    info    = info_store.get(chat_id)
-    if not info:
-        return await update.message.reply_text("ℹ️ No active countdown.")
+def _fmt(dt: datetime) -> str:
+    now = datetime.utcnow().replace(tzinfo=timezone.utc)
+    delta = dt - now
+    if delta.total_seconds() < 0:
+        return "0d 0h 0m 0s"
+    days = delta.days
+    hours, rem = divmod(delta.seconds, 3600)
+    minutes, seconds = divmod(rem, 60)
+    return f"{days}d {hours}h {minutes}m {seconds}s"
 
-    remain = info["target"] - datetime.now()
-    if remain <= timedelta(0):
-        return await update.message.reply_text(f"🎉 '{info['label']}' is now!")
 
-    d = remain.days
-    h, rem = divmod(remain.seconds, 3600)
-    m, s   = divmod(rem, 60)
+async def countdown_set(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "Usage: /countdown_set <YYYY-MM-DD HH:MM> <event>"
+        )
+        return
+    dt = _parse_dt(" ".join(context.args[:2]))
+    if dt is None:
+        await update.message.reply_text("❌ Invalid date/time format.")
+        return
+    title = " ".join(context.args[2:]).strip()
+    if not title:
+        await update.message.reply_text("❌ Please provide an event name.")
+        return
+    _countdowns[update.effective_chat.id] = (dt, title)
     await update.message.reply_text(
-        f"📅 {d}d {h:02d}h {m:02d}m {s:02d}s until '{info['label']}'."
+        f"✅ Countdown set for *{title}* – {_fmt(dt)} left.",
+        parse_mode="Markdown",
     )
 
 
-async def countdown_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    task    = active_tasks.pop(chat_id, None)
-    info_store.pop(chat_id, None)
-    if task:
-        task.cancel()
-        return await update.message.reply_text("🛑 Countdown canceled.")
-    return await update.message.reply_text("ℹ️ No active countdown to stop.")
+async def countdown_show(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    data = _countdowns.get(update.effective_chat.id)
+    if not data:
+        await update.message.reply_text("ℹ️ No countdown set.")
+        return
+    dt, title = data
+    await update.message.reply_text(
+        f"⏳ *{title}* – {_fmt(dt)} left.", parse_mode="Markdown"
+    )
 
 
-async def _ticker(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    info   = info_store.get(chat_id)
-    msg_id = info["msg_id"]
-    try:
-        while True:
-            remain = info["target"] - datetime.now()
-            if remain <= timedelta(0):
-                # 3️⃣ Final edit
-                await context.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=msg_id,
-                    text=f"🎉 '{info['label']}' is now!"
-                )
-                # 3️⃣ Broadcast celebration
-                await context.bot.send_message(
-                    chat_id,
-                    f"🎉 '{info['label']}' has arrived! 🎊"
-                )
-                break
-
-            d = remain.days
-            h, rem = divmod(remain.seconds, 3600)
-            m, s   = divmod(rem, 60)
-            text = f"📅 {d}d {h:02d}h {m:02d}m {s:02d}s until '{info['label']}'."
-            try:
-                await context.bot.edit_message_text(
-                    chat_id=chat_id,
-                    message_id=msg_id,
-                    text=text
-                )
-            except:
-                pass
-
-            await asyncio.sleep(1)
-
-    except asyncio.CancelledError:
-        # user hit /countdown_stop
-        pass
-    finally:
-        info_store.pop(chat_id, None)
-        active_tasks.pop(chat_id, None)
+async def countdown_clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if _countdowns.pop(update.effective_chat.id, None):
+        await update.message.reply_text("✅ Countdown cleared.")
+    else:
+        await update.message.reply_text("ℹ️ No countdown to clear.")
 
 
-def register_handlers(app):
-    app.add_handler(CommandHandler("countdown",        countdown_start))
-    app.add_handler(CommandHandler("countdown_status", countdown_status))
-    app.add_handler(CommandHandler("countdown_stop",   countdown_stop))
+def register_handlers(app: Application):
+    app.add_handler(CommandHandler("countdown_set", countdown_set))
+    app.add_handler(CommandHandler("countdown_show", countdown_show))
+    app.add_handler(CommandHandler("countdown_clear", countdown_clear))
