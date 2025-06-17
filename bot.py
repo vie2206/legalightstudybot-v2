@@ -61,11 +61,11 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
 
-    # 4) catch-all for unknown commands
-    app.add_handler(MessageHandler(filters.COMMAND, unknown_cmd))
-
-    # 5) register the study-task module handlers
+    # 4) register the study-task module handlers (must come before unknown)
     register_task_handlers(app)
+
+    # 5) catch-all for unknown slash commands (after all others)
+    app.add_handler(MessageHandler(filters.COMMAND, unknown_cmd))
 
     # 6) launch via webhook
     app.run_webhook(
