@@ -1,195 +1,165 @@
-# countdown.py  ─ live second-by-second event countdown
+# countdown.py  ✨ 2-Jun-2025
+"""
+Live, pinned countdown that updates every second until the target moment.
+
+Workflow
+--------
+/countdown   → wizard asks date, time, label, pin? (yes/no)
+/countdownstatus → show remaining once
+/countdownstop   → cancel
+"""
+from __future__ import annotations
 import asyncio, datetime as dt
 from typing import Dict
 
 from telegram import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Update,
+    Update, InlineKeyboardButton, InlineKeyboardMarkup
 )
 from telegram.ext import (
-    Application,
-    CommandHandler,
-    ContextTypes,
-    ConversationHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    filters,
+    Application, CommandHandler, ConversationHandler,
+    MessageHandler, CallbackQueryHandler,
+    ContextTypes, filters
 )
 
-# ────── conversation states
 ASK_DATE, ASK_TIME, ASK_LABEL, ASK_PIN = range(4)
 
-# per-chat storage
-count_meta: Dict[int, dict] = {}      # chat_id → {target, label, msg_id}
-count_tasks: Dict[int, asyncio.Task] = {}
+_meta: Dict[int, dict] = {}     # chat → {target, label, msg_id, pin}
+_tasks: Dict[int, asyncio.Task] = {}
 
-# ───────────────────────── helpers
-def _parse_date(s: str):
-    try:
-        return dt.date.fromisoformat(s.strip())
-    except ValueError:
-        return None
+# ──────────────────────────────────────────────────────────────
+def _parse_date(text: str) -> dt.date | None:
+    try: return dt.date.fromisoformat(text)
+    except ValueError: return None
 
+def _parse_time(text: str) -> dt.time | None:
+    if text.lower() == "now":  return dt.time(0, 0, 0)
+    try: return dt.time.fromisoformat(text)
+    except ValueError: return None
 
-def _parse_time(s: str):
-    s = s.strip().lower()
-    if s == "now":
-        return dt.time(0, 0, 0)
-    try:
-        return dt.time.fromisoformat(s)
-    except ValueError:
-        return None
-
-
-# ───────────────────────── wizard entry
-async def cd_start(update: Update, _):
-    await update.message.reply_text("📅 Target *date*?  (YYYY-MM-DD)", parse_mode="Markdown")
+# ───────────────────── conversation steps ─────────────────────
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE)->int:
+    await update.message.reply_text("📅 Target *date*? (YYYY-MM-DD)", parse_mode="Markdown")
     return ASK_DATE
 
-
-async def cd_date(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    d = _parse_date(update.message.text)
+async def step_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE)->int:
+    d = _parse_date(update.message.text.strip())
     if not d:
-        await update.message.reply_text("❌ Invalid date. Try again (YYYY-MM-DD).")
+        await update.message.reply_text("❌ Invalid date. Try YYYY-MM-DD.")
         return ASK_DATE
-    context.user_data["cd_date"] = d
+    ctx.user_data["date"] = d
     await update.message.reply_text(
-        "⏰ Target *time*?  (HH:MM:SS or `now`)", parse_mode="Markdown"
+        "⏰ Target *time*? (HH:MM:SS or `now`)", parse_mode="Markdown"
     )
     return ASK_TIME
 
-
-async def cd_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    t = _parse_time(update.message.text)
+async def step_time(update: Update, ctx: ContextTypes.DEFAULT_TYPE)->int:
+    t = _parse_time(update.message.text.strip())
     if t is None:
-        await update.message.reply_text("❌ Invalid time. Try again.")
+        await update.message.reply_text("❌ Invalid time. Try HH:MM:SS or `now`.")
         return ASK_TIME
-    context.user_data["cd_time"] = t
-    await update.message.reply_text("🏷  Event label? (max 60 chars)")
+    ctx.user_data["time"] = t
+    await update.message.reply_text("🏷  Event label? (≤60 chars)", parse_mode="Markdown")
     return ASK_LABEL
 
-
-async def cd_label(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data["cd_label"] = update.message.text.strip()[:60]
-    kb = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("📌 Pin", callback_data="pin_yes"),
-          InlineKeyboardButton("Skip",  callback_data="pin_no")]]
-    )
-    await update.message.reply_text("Pin this countdown message?", reply_markup=kb)
+async def step_label(update: Update, ctx: ContextTypes.DEFAULT_TYPE)->int:
+    ctx.user_data["label"] = update.message.text.strip()[:60]
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📌 Pin", callback_data="pin_yes"),
+         InlineKeyboardButton("No thanks", callback_data="pin_no")]
+    ])
+    await update.message.reply_text("Pin this countdown at the top?", reply_markup=kb)
     return ASK_PIN
 
-
-async def pin_choice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def pin_choice(update: Update, ctx: ContextTypes.DEFAULT_TYPE)->int:
     q = update.callback_query
     await q.answer()
+    pin = (q.data == "pin_yes")
+    cid = q.message.chat.id
 
-    pin   = q.data == "pin_yes"
-    chat  = q.message.chat
-    cid   = chat.id
+    # build target datetime (UTC-aware to avoid offsets)
+    date: dt.date = ctx.user_data["date"]
+    time_: dt.time = ctx.user_data["time"]
+    target = dt.datetime.combine(date, time_).replace(tzinfo=dt.timezone.utc)
 
-    # build target datetime
-    date  = context.user_data["cd_date"]
-    time_ = context.user_data["cd_time"]
-    target = dt.datetime.combine(date, time_)
+    # cancel older countdown in this chat
+    if (t := _tasks.pop(cid, None)): t.cancel()
 
-    # cancel any existing timer for this chat
-    old = count_tasks.pop(cid, None)
-    if old:
-        old.cancel()
+    _meta[cid] = meta = {
+        "target": target,
+        "label":  ctx.user_data["label"],
+        "msg_id": None,
+        "pin":    pin,
+    }
 
-    # initial placeholder message
-    msg = await q.edit_message_text("⏳ Starting countdown…")
-
+    sent = await q.message.reply_text("⏳ Starting countdown…")
+    meta["msg_id"] = sent.message_id
     if pin:
-        try:
-            await q.bot.pin_chat_message(cid, msg.message_id, disable_notification=True)
-        except Exception:
-            pass  # ignore pin failures (e.g., no permission)
+        try: await q.bot.pin_chat_message(cid, sent.message_id, disable_notification=True)
+        except Exception: pass   # ignore “not enough rights”
 
-    # store meta & launch loop
-    count_meta[cid] = {"target": target, "label": context.user_data["cd_label"], "msg_id": msg.message_id}
-    _launch_countdown(cid, context)
-
+    _tasks[cid] = asyncio.create_task(_ticker(cid, q.bot))
     return ConversationHandler.END
 
+async def cancel(update: Update, ctx):   # fallback /cancel
+    await update.message.reply_text("Countdown cancelled.")
+    return ConversationHandler.END
 
-# ───────────────────────── command helpers
-async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cid = update.effective_chat.id
-    if cid not in count_meta:
-        await update.message.reply_text("ℹ️ No active countdown.")
-        return
-    await _edit(cid, context.bot)
-
-
-async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    cid  = update.effective_chat.id
-    task = count_tasks.pop(cid, None)
-    if task:
-        task.cancel()
-    count_meta.pop(cid, None)
-    await update.message.reply_text("🚫 Countdown cancelled.")
-
-
-# ───────────────────────── internal loop
+# ───────────────────── helpers ─────────────────────
 async def _edit(cid: int, bot) -> bool:
-    m = count_meta[cid]
-    left = m["target"] - dt.datetime.utcnow()
-
-    if left.total_seconds() <= 0:
-        try:
-            await bot.edit_message_text(
-                chat_id=cid,
-                message_id=m["msg_id"],
-                text=f"🎉 {m['label']} reached!"
-            )
-        except Exception:
-            pass
+    meta = _meta[cid]
+    remaining = meta["target"] - dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc)
+    if remaining.total_seconds() <= 0:
+        await bot.edit_message_text(
+            cid, meta["msg_id"], text=f"🎉 {meta['label']} reached!"
+        )
         return False
-
-    days = left.days
-    hrs, rem = divmod(left.seconds, 3600)
+    days = remaining.days
+    hrs, rem = divmod(remaining.seconds, 3600)
     mins, secs = divmod(rem, 60)
     txt = (
-        f"⏳ *{m['label']}*\n"
-        f"{days} d {hrs:02} h {mins:02} m {secs:02} s remaining."
+        f"⏳ *{meta['label']}*\n"
+        f"{days}d {hrs}h {mins}m {secs}s remaining."
     )
     try:
-        await bot.edit_message_text(
-            chat_id=cid,
-            message_id=m["msg_id"],
-            text=txt,
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        if "message is not modified" not in str(e).lower():
-            raise
+        await bot.edit_message_text(cid, meta["msg_id"], txt, parse_mode="Markdown")
+    except Exception:   # network glitch, chat moved, etc.
+        return True     # keep trying
     return True
 
+async def _ticker(cid: int, bot):
+    """Background loop that refreshes every second, resilient to errors."""
+    try:
+        while True:
+            ok = await _edit(cid, bot)
+            if not ok: break
+            await asyncio.sleep(1)
+    finally:
+        _tasks.pop(cid, None)
+        _meta.pop(cid,  None)
 
-def _launch_countdown(cid: int, ctx: ContextTypes.DEFAULT_TYPE):
-    async def loop():
-        try:
-            while await _edit(cid, ctx.bot):
-                await asyncio.sleep(1)          # update every second
-        except asyncio.CancelledError:
-            pass
+# ───────────────────── public cmd handlers ─────────────────────
+async def status(update: Update, ctx):
+    meta = _meta.get(update.effective_chat.id)
+    if not meta: return await update.message.reply_text("ℹ️ No active countdown.")
+    await _edit(update.effective_chat.id, ctx.bot)
 
-    count_tasks[cid] = ctx.application.create_task(loop())
+async def stop(update: Update, ctx):
+    cid = update.effective_chat.id
+    if (t := _tasks.pop(cid, None)): t.cancel()
+    _meta.pop(cid, None)
+    await update.message.reply_text("🚫 Countdown cancelled.")
 
-
-# ───────────────────────── registration
+# ───────────────────── registrar ─────────────────────
 def register_handlers(app: Application):
     conv = ConversationHandler(
-        entry_points=[CommandHandler("countdown", cd_start)],
+        entry_points=[CommandHandler("countdown", start)],
         states={
-            ASK_DATE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, cd_date)],
-            ASK_TIME:  [MessageHandler(filters.TEXT & ~filters.COMMAND, cd_time)],
-            ASK_LABEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, cd_label)],
+            ASK_DATE:  [MessageHandler(filters.TEXT & ~filters.COMMAND, step_date)],
+            ASK_TIME:  [MessageHandler(filters.TEXT & ~filters.COMMAND, step_time)],
+            ASK_LABEL: [MessageHandler(filters.TEXT & ~filters.COMMAND, step_label)],
             ASK_PIN:   [CallbackQueryHandler(pin_choice, pattern="^pin_")],
         },
-        fallbacks=[CommandHandler("cancel", stop)],
+        fallbacks=[CommandHandler("cancel", cancel)],
         per_chat=True,
     )
     app.add_handler(conv)
