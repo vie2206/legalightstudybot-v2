@@ -94,8 +94,6 @@ def register_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("mystreak",       mystreak))
     app.add_handler(CommandHandler("streak_alerts",  streak_alerts))
 
-    # run the hourly checker *after* the PTB event-loop is up
-    async def _launch_bg_task(application: Application) -> None:
-        application.create_task(_hourly_loop(application.bot))
-
-    app.post_init(_launch_bg_task)          # ← key line
+# helper the main module will call after start-up
+async def launch_streak_loop(application: Application) -> None:
+    application.create_task(_hourly_loop(application.bot))
