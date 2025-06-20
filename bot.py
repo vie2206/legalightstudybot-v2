@@ -36,32 +36,38 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ────────── Telegram “Menu” commands ──────────
+# bot.py  ── only the COMMAND_MENU block needs tweaking
 COMMAND_MENU = [
     BotCommand("start",          "Restart the bot"),
     BotCommand("help",           "Show help message"),
 
+    # study-task stopwatch
     BotCommand("task_start",     "Start stopwatch study task"),
     BotCommand("task_status",    "Show task timer"),
     BotCommand("task_pause",     "Pause task"),
     BotCommand("task_resume",    "Resume task"),
     BotCommand("task_stop",      "Stop & log task"),
 
+    # Pomodoro timer
     BotCommand("timer",          "Start Pomodoro"),
     BotCommand("timer_status",   "Pomodoro status"),
     BotCommand("timer_pause",    "Pause Pomodoro"),
     BotCommand("timer_resume",   "Resume Pomodoro"),
     BotCommand("timer_stop",     "Stop Pomodoro"),
 
+    # live countdown
     BotCommand("countdown",        "Start live countdown"),
     BotCommand("countdownstatus",  "Countdown status"),
     BotCommand("countdownstop",    "Cancel countdown"),
 
+    # streaks
     BotCommand("checkin",        "Record today’s check-in"),
     BotCommand("mystreak",       "Show study streak"),
     BotCommand("streak_alerts",  "Toggle streak alerts"),
 
+    # NEW — doubts
     BotCommand("doubt",          "Ask a study doubt"),
-    BotCommand("my_doubts",      "Your open / resolved doubts"),
+    BotCommand("mydoubts",       "Quota & status"),
 ]
 KNOWN_CMDS = [c.command for c in COMMAND_MENU]
 
