@@ -1,266 +1,251 @@
+# doubts.py  ───────────────────────────────────────────────────────────
 """
-doubts.py  –  Raise-a-Doubt module
-──────────────────────────────────
+Private ➜ public doubt-handling module.
+
 Commands
-  /doubt               → interactive wizard
-  /my_doubts           → list your own pending & resolved doubts
-Admin-only
-  /doubt_list [open|all]      → show IDs waiting for answer
-  /doubt_answer <id>          → begin reply flow (public or private)
-  /doubt_resolved <id>        → mark resolved without answer
+--------
+/doubt         – open inline wizard, submit text or a single photo + caption
+/mydoubts      – list your last N doubts with their status
+Admins will see an “Answer” button to publish or PM a reply.
 
-Quota
-  •  2 PUBLIC answers / 24 h
-  •  3 PRIVATE answers / 24 h
+Environment
+-----------
+ADMIN_ID   – telegram user-id of the bot owner (default: 803299591)
 """
 
-import asyncio, datetime as dt, io, os
+import asyncio, os, time
+from contextlib import suppress
 from enum import Enum, auto
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Optional
 
 from telegram import (
-    InlineKeyboardButton, InlineKeyboardMarkup, Update, InputMediaPhoto
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+    InputMediaPhoto,
+    Message,
 )
 from telegram.ext import (
-    Application, CallbackQueryHandler, CommandHandler, ConversationHandler,
-    MessageHandler, ContextTypes, filters
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ConversationHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
 )
 
+# read admin (owner) id here – no more circular import
+ADMIN_ID = int(os.getenv("ADMIN_ID", "803299591"))
+
+# DB stuff
 from database import session_scope, Doubt, DoubtQuota
-from bot import ADMIN_ID           # import constant from main module
 
-# ────────────────────────────────────────────────────────────────────
-# Wizard states
-ASK_SUBJECT, ASK_NATURE, ASK_TEXT, ASK_MEDIA, CONFIRM_SUBMIT = range(5)
+# ────────── conversation states ──────────
+ASK_CAT, ASK_CONTENT = range(2)
 
-# preset lists
-SUBJECTS = [
-    "English", "Maths", "GK / Current-Affairs", "Legal Reasoning",
-    "Logical Reasoning", "Sectional-Test", "Full-Mock", "CLATOPEDIA",
-    "Other (custom)",
-]
-NATURES = [
-    "Can't solve", "Can't understand explanation", "Wrong answer?",
-    "Concept clarification", "General guidance"
-]
+# available categories + custom option
+CATEGORIES = (
+    "Concept", "Question-solving", "Wrong answer", "Resource request",
+    "Strategy", "Other ❓",
+)
 
-# ────────────────────────────────────────────────────────────────────
-# Utility helpers
-def _today() -> dt.date:
-    return dt.datetime.utcnow().date()
+# text & photo are stored in memory only until saved
+_pending_media: Dict[int, dict] = {}  # chat_id → {"cat": str, "text": str, "photo": file_id}
 
 
-def _check_quota(user_id: int, public: bool) -> bool:
-    """Return True if user still has quota left *after* this submission."""
-    with session_scope() as s:
-        q: DoubtQuota = (
-            s.query(DoubtQuota)
-            .filter(DoubtQuota.user_id == user_id,
-                    DoubtQuota.date == _today())
-            .first()
-        )
-        if not q:
-            q = DoubtQuota(
-                user_id=user_id, date=_today(),
-                public_count=0, private_count=0
-            )
-            s.add(q)
-            s.flush()
-
-        if public:
-            allowed = q.public_count < 2
-            if allowed:
-                q.public_count += 1
-            return allowed
-        allowed = q.private_count < 3
-        if allowed:
-            q.private_count += 1
-        return allowed
-
-
-async def _send_admin_notification(app: Application, doubt: Doubt):
-    txt = (f"🆕 *New doubt* #{doubt.id}\n"
-           f"*From*: [{doubt.user_id}](tg://user?id={doubt.user_id})\n"
-           f"*Subject*: {doubt.subject}\n"
-           f"*Nature*: {doubt.nature}")
-    await app.bot.send_message(
-        ADMIN_ID, txt, parse_mode="Markdown"
+# ──────────────────────────────────────────────────────────────────────
+async def doubt_start(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    """/doubt entry point – show category keyboard."""
+    kb = [[InlineKeyboardButton(c, callback_data=f"C|{c}")] for c in CATEGORIES]
+    await upd.message.reply_text(
+        "Pick a category for your doubt:",
+        reply_markup=InlineKeyboardMarkup(kb),
     )
-    if doubt.photo_file_id:
-        await app.bot.send_photo(ADMIN_ID, doubt.photo_file_id)
-    if doubt.text:
-        await app.bot.send_message(ADMIN_ID, f"```{doubt.text}```",
-                                   parse_mode="Markdown")
+    return ASK_CAT
 
 
-# ────────────────────────────────────────────────────────────────────
-# Wizard entry
-async def doubt_entry(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    kb = [[InlineKeyboardButton(s, callback_data=f"subj|{s}")]
-          for s in SUBJECTS]
-    await update.message.reply_text(
-        "📌 *Raise a doubt* – pick the subject category:",
-        reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown"
-    )
-    return ASK_SUBJECT
-
-
-async def pick_subject(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    q = update.callback_query
+async def cat_chosen(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    q = upd.callback_query
     await q.answer()
-    subj = q.data.split("|", 1)[1]
-    ctx.user_data["subject"] = subj
-    # nature
-    kb = [[InlineKeyboardButton(n, callback_data=f"nat|{n}")]
-          for n in NATURES]
+    cat = q.data.split("|", 1)[1]
+    _pending_media[q.message.chat.id] = {"cat": cat}
     await q.edit_message_text(
-        "🔍 Pick the *nature* of the doubt:",
-        reply_markup=InlineKeyboardMarkup(kb), parse_mode="Markdown"
+        "Great! Now send **either** a text description *or* one photo with an "
+        "optional caption (max 1).",
+        parse_mode="Markdown",
     )
-    return ASK_NATURE
+    return ASK_CONTENT
 
 
-async def pick_nature(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    q = update.callback_query
-    await q.answer()
-    ctx.user_data["nature"] = q.data.split("|", 1)[1]
-    await q.edit_message_text(
-        "✍️ Send your doubt text (or type `skip`):", parse_mode="Markdown"
-    )
-    return ASK_TEXT
+async def receive_content(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    chat_id = upd.effective_chat.id
+    pend = _pending_media.get(chat_id)
+    if not pend:
+        return ConversationHandler.END  # should not happen
 
-
-async def text_received(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    txt = update.message.text
-    if txt.lower().strip() != "skip":
-        ctx.user_data["text"] = txt[:4096]
-    await update.message.reply_text(
-        "📷 Now send 1 photo *or* 1 PDF (<=20 MB), or type `skip`.",
-        parse_mode="Markdown"
-    )
-    return ASK_MEDIA
-
-
-async def media_received(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.message.text and update.message.text.lower().strip() == "skip":
-        # no media
-        return await _confirm(update, ctx)
-
-    if update.message.photo:
-        file_id = update.message.photo[-1].file_id
-        ctx.user_data["photo"] = file_id
-    elif update.message.document and update.message.document.mime_type == "application/pdf":
-        ctx.user_data["pdf"] = update.message.document.file_id
+    # enforce 1 piece of media
+    if upd.message.photo:
+        if "photo" in pend or "text" in pend:
+            await upd.message.reply_text("You already sent something – use /cancel first.")
+            return ASK_CONTENT
+        pend["photo"] = upd.message.photo[-1].file_id
+        pend["caption"] = upd.message.caption or ""
     else:
-        return await update.message.reply_text("❌ Send photo or PDF only, or `skip`.") or ASK_MEDIA
+        if "text" in pend or "photo" in pend:
+            await upd.message.reply_text("You already sent something – use /cancel first.")
+            return ASK_CONTENT
+        pend["text"] = upd.message.text_html or upd.message.text_markdown or upd.message.text
 
-    return await _confirm(update, ctx)
+    # validate quota
+    uid = upd.effective_user.id
+    with session_scope() as db:
+        quota = DoubtQuota.get_or_create(db, uid)
+        if not quota.consume():
+            await upd.message.reply_text(
+                "🚫 You’ve reached today’s free-doubt limit. "
+                "Upgrade your plan to ask more."
+            )
+            _pending_media.pop(chat_id, None)
+            return ConversationHandler.END
+        db.add(quota)
 
-
-async def _confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    kb = [
-        [InlineKeyboardButton("Submit ✅", callback_data="cfm|yes"),
-         InlineKeyboardButton("Cancel ❌", callback_data="cfm|no")]
-    ]
-    await update.message.reply_text(
-        "Submit this doubt?", reply_markup=InlineKeyboardMarkup(kb)
-    )
-    return CONFIRM_SUBMIT
-
-
-async def confirm_submit(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
-    q = update.callback_query
-    await q.answer()
-    if q.data.endswith("|no"):
-        await q.edit_message_text("🚫 Doubt cancelled.")
-        return ConversationHandler.END
-
-    # build DB row
-    data = ctx.user_data
-    is_public = True   # default public
-    if not _check_quota(q.from_user.id, is_public):
-        await q.edit_message_text(
-            "⚠️ Daily public quota reached (2). Try private, or upgrade."
-        )
-        return ConversationHandler.END
-
-    with session_scope() as s:
+        # persist doubt
         d = Doubt(
-            user_id=q.from_user.id,
-            subject=data.get("subject"),
-            nature=data.get("nature"),
-            text=data.get("text"),
-            photo_file_id=data.get("photo"),
-            pdf_file_id=data.get("pdf"),
-            public=is_public,
+            user_id=uid,
+            category=pend["cat"],
+            text=pend.get("text", ""),
+            photo_id=pend.get("photo"),
+            created=int(time.time()),
         )
-        s.add(d)
-        s.flush()
+        db.add(d)
 
-    await q.edit_message_text("✅ Doubt submitted!")
-    # ping admin
-    await _send_admin_notification(ctx.application, d)
-    ctx.user_data.clear()
+    # notify admin privately
+    await ctx.bot.send_message(
+        ADMIN_ID,
+        f"📩 *New doubt* from [{upd.effective_user.first_name}](tg://user?id={uid})\n"
+        f"*Category:* {pend['cat']}\n"
+        f"ID: {d.id}",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Answer ✔️", callback_data=f"A|{d.id}")]]
+        ),
+    )
+
+    # confirm to student
+    await upd.message.reply_text("✅ Doubt received! I’ll get back to you soon.")
+    _pending_media.pop(chat_id, None)
     return ConversationHandler.END
 
 
-# ────────────────────────────────────────────────────────────────────
-async def my_doubts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    with session_scope() as s:
-        rows: List[Doubt] = (
-            s.query(Doubt)
-            .filter(Doubt.user_id == update.effective_user.id)
-            .order_by(Doubt.id.desc())
+async def cancel(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    _pending_media.pop(upd.effective_chat.id, None)
+    await upd.message.reply_text("❌ Doubt cancelled.")
+    return ConversationHandler.END
+
+
+# ────────── admin flow ──────────
+async def answer_button(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = upd.callback_query
+    await q.answer()
+    _, did = q.data.split("|", 1)
+
+    with session_scope() as db:
+        d: Optional[Doubt] = db.get(Doubt, int(did))
+        if not d or d.answered_ts:
+            await q.edit_message_text("This doubt was already answered.")
+            return
+        ctx.user_data["answering"] = d.id
+        await q.edit_message_text(
+            f"Reply to this message with your *answer* for doubt #{d.id}.",
+            parse_mode="Markdown",
+        )
+
+
+async def save_answer(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if "answering" not in ctx.user_data:
+        return
+    did = ctx.user_data.pop("answering")
+
+    with session_scope() as db:
+        d: Optional[Doubt] = db.get(Doubt, did)
+        if not d:
+            return
+        d.answer_text = upd.message.text_html or upd.message.text_markdown or upd.message.text
+        d.answered_ts = int(time.time())
+        db.add(d)
+
+        # send to student (private)
+        await ctx.bot.send_message(
+            d.user_id,
+            f"📝 *Answer to your doubt* #{d.id}\n\n{d.answer_text}",
+            parse_mode="Markdown",
+            reply_to_message_id=None,
+        )
+
+        # post publicly in the group/channel
+        target_chat = os.getenv("PUBLIC_ANSWER_CHAT")
+        if target_chat:
+            if d.photo_id:
+                await ctx.bot.send_photo(
+                    target_chat,
+                    d.photo_id,
+                    caption=f"❓ {d.text}\n\n📝 {d.answer_text}",
+                    parse_mode="Markdown",
+                )
+            else:
+                await ctx.bot.send_message(
+                    target_chat,
+                    f"❓ {d.text}\n\n📝 {d.answer_text}",
+                    parse_mode="Markdown",
+                )
+
+    await upd.message.reply_text("✅ Posted!")
+    return
+
+
+# ────────── list my doubts ──────────
+async def mydoubts(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = upd.effective_user.id
+    with session_scope() as db:
+        rows = (
+            db.query(Doubt)
+            .filter(Doubt.user_id == uid)
+            .order_by(Doubt.created.desc())
             .limit(10)
             .all()
         )
     if not rows:
-        return await update.message.reply_text("No doubts logged yet.")
-    msg = "\n".join(
-        f"#{d.id} – *{d.subject}* ({'✅' if d.answered_at else '⏳'})"
+        return await upd.message.reply_text("No doubts yet.")
+    txt = "\n\n".join(
+        f"*#{d.id}* — {d.category}\n"
+        f"{'✅ Answered' if d.answered_ts else '⏳ Pending'}"
         for d in rows
     )
-    await update.message.reply_text(msg, parse_mode="Markdown")
+    await upd.message.reply_text(txt, parse_mode="Markdown")
 
-# ────────────────────────────────────────────────────────────────────
-# admin helpers (minimal)
-async def doubt_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    filter_open = (ctx.args and ctx.args[0] == "open")
-    with session_scope() as s:
-        q = s.query(Doubt)
-        if filter_open:
-            q = q.filter(Doubt.answered_at.is_(None))
-        rows = q.order_by(Doubt.id).all()
-    if not rows:
-        await update.message.reply_text("No doubts.")
-    txt = "\n".join(f"#{d.id} – {d.subject} ({'✅' if d.answered_at else '⏳'})"
-                    for d in rows)
-    await update.message.reply_text(txt or "No doubts.")
 
-# (Answering flow intentionally omitted for brevity)
-
-# ────────────────────────────────────────────────────────────────────
+# ────────── registration helper ──────────
 def register_handlers(app: Application):
-    wizard = ConversationHandler(
-        entry_points=[CommandHandler("doubt", doubt_entry)],
+    conv = ConversationHandler(
+        entry_points=[CommandHandler("doubt", doubt_start)],
         states={
-            ASK_SUBJECT: [CallbackQueryHandler(pick_subject, pattern=r"^subj\|")],
-            ASK_NATURE:  [CallbackQueryHandler(pick_nature,  pattern=r"^nat\|")],
-            ASK_TEXT:    [MessageHandler(filters.TEXT & ~filters.COMMAND, text_received)],
-            ASK_MEDIA: [
-                MessageHandler(filters.PHOTO | filters.Document.PDF | filters.Regex("^skip$"),
-                               media_received)
+            ASK_CAT:   [CallbackQueryHandler(cat_chosen, pattern=r"^C\|")],
+            ASK_CONTENT: [
+                MessageHandler(filters.PHOTO, receive_content),
+                MessageHandler(filters.TEXT & (~filters.COMMAND), receive_content),
             ],
-            CONFIRM_SUBMIT: [CallbackQueryHandler(confirm_submit, pattern=r"^cfm\|")],
         },
-        fallbacks=[],
-        per_user=True,
-        per_message=False,
+        fallbacks=[CommandHandler("cancel", cancel)],
+        per_chat=True,
     )
-    app.add_handler(wizard)
-    app.add_handler(CommandHandler("my_doubts", my_doubts))
+    app.add_handler(conv)
 
-    # admin
-    app.add_handler(CommandHandler("doubt_list", doubt_list))
+    # admin answer flow
+    app.add_handler(CallbackQueryHandler(answer_button, pattern=r"^A\|\d+$"))
+    app.add_handler(MessageHandler(
+        filters.TEXT & filters.User(ADMIN_ID) & (~filters.COMMAND), save_answer
+    ))
+
+    # misc
+    app.add_handler(CommandHandler("mydoubts", mydoubts))
