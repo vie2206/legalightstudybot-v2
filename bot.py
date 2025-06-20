@@ -109,7 +109,7 @@ def build_app() -> Application:
     countdown.register_handlers(app)
     streak.register_handlers(app)
     study_tasks.register_handlers(app)
-    doubts.register_handlers(app, ADMIN_ID)
+    doubts.register_handlers(app)
 
     # unknown command fallback
     unknown_filter = filters.COMMAND & (~filters.Regex(rf"^/({'|'.join(KNOWN_CMDS)})"))
