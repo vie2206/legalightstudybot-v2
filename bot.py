@@ -56,7 +56,8 @@ COMMAND_MENU = [
     BotCommand("checkin",          "Record today’s study"),
     BotCommand("mystreak",         "Show study streak"),
     BotCommand("streak_alerts",    "Toggle streak alerts"),
-    BotCommand("doubt",            "Raise a study doubt"),   # ← new
+    BotCommand("doubt",        "Ask a study-doubt"),      # ← add
+   
 ]
 KNOWN_CMDS = [c.command for c in COMMAND_MENU]
 
