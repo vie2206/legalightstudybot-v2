@@ -48,3 +48,4 @@ class DoubtQuota(Base):
     date          = Column(Date, nullable=False, index=True)
     public_count  = Column(Integer, default=0)
     private_count = Column(Integer, default=0)
+    last_reset    = Column(Date, nullable=True) 
