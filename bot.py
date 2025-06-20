@@ -18,28 +18,38 @@ logging.basicConfig(level=logging.INFO,
                     format="%(levelname)s | %(name)s | %(message)s")
 log = logging.getLogger(__name__)
 
-# ────────── slash-command menu ──────────
+# ────────── Telegram command-menu ──────────
 COMMAND_MENU = [
-    BotCommand("start", "Restart the bot"), BotCommand("help",  "Show help"),
-    # study-tasks
-    BotCommand("task_start","Stop-watch study task"),BotCommand("task_status","Task status"),
-    BotCommand("task_pause","Pause task"),BotCommand("task_resume","Resume task"),
-    BotCommand("task_stop","Stop task"),
-    # Pomodoro
-    BotCommand("timer","Pomodoro wizard"),BotCommand("timer_status","Pomodoro status"),
-    BotCommand("timer_pause","Pause Pomodoro"),BotCommand("timer_resume","Resume Pomodoro"),
-    BotCommand("timer_stop","Stop Pomodoro"),
-    # countdown
-    BotCommand("countdown","Live countdown"),
-    BotCommand("countdownstatus","Countdown status"),
-    BotCommand("countdownstop","Cancel countdown"),
-    # streak
-    BotCommand("checkin","Daily check-in"),
-    BotCommand("mystreak","Show streak"),
-    BotCommand("streak_alerts","Toggle streak alerts"),
-    # doubts
-    BotCommand("doubt","Ask a doubt"),
-    BotCommand("my_doubts","My last doubts"),
+    BotCommand("start",            "Restart the bot"),
+    BotCommand("help",             "Show help message"),
+
+    # ⏱  Study-task stopwatch
+    BotCommand("task_start",       "Start stopwatch study task"),
+    BotCommand("task_status",      "Show task timer"),
+    BotCommand("task_pause",       "Pause task"),
+    BotCommand("task_resume",      "Resume task"),
+    BotCommand("task_stop",        "Stop & log task"),
+
+    # 🍅  Pomodoro
+    BotCommand("timer",            "Start Pomodoro"),
+    BotCommand("timer_status",     "Pomodoro status"),
+    BotCommand("timer_pause",      "Pause Pomodoro"),
+    BotCommand("timer_resume",     "Resume Pomodoro"),
+    BotCommand("timer_stop",       "Stop Pomodoro"),
+
+    # 📆  Countdown
+    BotCommand("countdown",        "Start live countdown"),
+    BotCommand("countdownstatus",  "Countdown status"),
+    BotCommand("countdownstop",    "Cancel countdown"),
+
+    # 🔥  Streaks
+    BotCommand("checkin",          "Record today’s check-in"),
+    BotCommand("mystreak",         "Show study streak"),
+    BotCommand("streak_alerts",    "Toggle streak alerts"),
+
+    # ❓  Doubts
+    BotCommand("doubt",            "Ask a doubt"),        # NEW
+    BotCommand("mydoubts",         "List my doubts"),     # NEW
 ]
 KNOWN_CMDS = [c.command for c in COMMAND_MENU]
 
