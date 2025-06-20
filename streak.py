@@ -88,10 +88,14 @@ async def _hourly_loop(bot):
         await asyncio.sleep(3600)    # run every hour
 
 # ──────────────────────────────────────────────────────────────
-def register_handlers(app: Application):
+def register_handlers(app: Application) -> None:
+    # command handlers
     app.add_handler(CommandHandler("checkin",        checkin))
     app.add_handler(CommandHandler("mystreak",       mystreak))
     app.add_handler(CommandHandler("streak_alerts",  streak_alerts))
 
-    # launch the background checker once the app is up
-    app.create_task(_hourly_loop(app.bot))
+    # run the hourly checker *after* the PTB event-loop is up
+    async def _launch_bg_task(application: Application) -> None:
+        application.create_task(_hourly_loop(application.bot))
+
+    app.post_init(_launch_bg_task)          # ← key line
