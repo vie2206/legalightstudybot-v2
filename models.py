@@ -1,42 +1,50 @@
-# models.py
-import datetime
-from sqlalchemy import Column, Integer, String, DateTime
-from sqlalchemy.ext.declarative import declarative_base
+"""
+models.py  – SQLAlchemy ORM definitions
+Add any new tables here; database.py imports `Base` and runs Base.metadata.create_all().
+"""
+
+import datetime as dt
+from sqlalchemy import (
+    Column, Integer, String, Boolean, DateTime, Date, Text
+)
+from sqlalchemy.orm import declarative_base
 
 Base = declarative_base()
 
-class TaskLog(Base):
-    __tablename__ = 'tasks_log'
+# ─────────────────────────────────────────────────────────────
+# ⬇ existing tables from your project (keep them) …
+# Example:
+# class TimerLog(Base):
+#     __tablename__ = "timer_log"
+#     id        = Column(Integer, primary_key=True)
+#     user_id   = Column(Integer, nullable=False, index=True)
+#     started   = Column(DateTime, default=dt.datetime.utcnow)
+#     seconds   = Column(Integer, default=0)
+#
+# (Leave your current definitions untouched – just add the two below.)
 
-    # preset list of allowed task types
-    TYPES = [
-        'CLAT_MOCK', 'SECTIONAL', 'NEWSPAPER', 'EDITORIAL', 'GK_CA', 'MATHS',
-        'LEGAL_REASONING', 'LOGICAL_REASONING', 'CLATOPEDIA',
-        'SELF_STUDY', 'ENGLISH', 'STUDY_TASK'
-    ]
+# ─────────────────────────────────────────────────────────────
+# 1️⃣  Doubt table
+class Doubt(Base):
+    __tablename__ = "doubts"
 
-    id        = Column(Integer, primary_key=True)
-    user_id   = Column(Integer, index=True, nullable=False)
-    chat_id   = Column(Integer, nullable=False)
-    task_type = Column(String, nullable=False)
-    start_ts  = Column(DateTime, nullable=False)
-    paused_at = Column(DateTime, nullable=True)
-    elapsed   = Column(Integer, default=0, nullable=False)  # accumulated seconds
-    end_ts    = Column(DateTime, nullable=True)
+    id            = Column(Integer, primary_key=True)
+    user_id       = Column(Integer, nullable=False, index=True)
+    subject       = Column(String(64))
+    nature        = Column(String(64))
+    text          = Column(Text)
+    photo_file_id = Column(String(256))
+    pdf_file_id   = Column(String(256))
+    public        = Column(Boolean, default=True)
+    asked_at      = Column(DateTime, default=dt.datetime.utcnow)
+    answered_at   = Column(DateTime)
 
-    def elapsed_str(self) -> str:
-        """Return human-readable total elapsed (h m s)."""
-        total = self.elapsed
-        if self.paused_at is None and self.end_ts is None:
-            # still running, add live seconds
-            delta = datetime.datetime.utcnow() - self.start_ts
-            total += int(delta.total_seconds())
-        hrs, rem = divmod(total, 3600)
-        mins, secs = divmod(rem, 60)
-        parts = []
-        if hrs:
-            parts.append(f"{hrs}h")
-        if mins or hrs:
-            parts.append(f"{mins}m")
-        parts.append(f"{secs}s")
-        return " ".join(parts)
+# 2️⃣  Daily quota tracker
+class DoubtQuota(Base):
+    __tablename__ = "doubt_quota"
+
+    id            = Column(Integer, primary_key=True)
+    user_id       = Column(Integer, nullable=False, index=True)
+    date          = Column(Date, nullable=False, index=True)
+    public_count  = Column(Integer, default=0)
+    private_count = Column(Integer, default=0)
