@@ -26,7 +26,7 @@ class DoubtQuota(Base):
     __tablename__ = "doubt_quota"
     id            = Column(Integer, primary_key=True)
     user_id       = Column(Integer, nullable=False)
-    date          = Column(Date,    nullable=False)
+    last_reset   = Column(Date, nullable=False)
     public_count  = Column(Integer, default=0)
     private_count = Column(Integer, default=0)
 
