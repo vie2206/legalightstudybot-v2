@@ -1,244 +1,304 @@
-# doubts.py
+# doubts.py  – full module, drop-in replacement
 """
-Ask-a-Doubt system.
+/doubt  →  Subject 🔽  →  Nature 🔽  →  ask for text/photo  →
+          choose Public / Private  →  stored & forwarded to ADMIN
 
-Flow
-====
-/doubt  ─►  SUBJECT menu  ─►  Nature menu  ─►  ask for text *or* 1 photo
-          (custom subject)    (custom nature)
-
-Tables (see database.py)
-------------------------
-•  doubts        – full record of every doubt (subject, nature, text, photo_id …)
-•  doubt_quotas  – per-user daily quota (2 public + 3 private answers default)
-
-Quota rules
------------
-•  max 3 private   + 2 public doubts per rolling 24 h
+Daily limits per user
+---------------------
+• Public doubts   : 2 / day
+• Private doubts  : 3 / day
 """
 
-import asyncio, datetime as dt, io
-from enum import Enum
-from typing import Dict, Tuple, Optional
+import datetime as dt
+from enum import Enum, auto
 
 from telegram import (
-    InlineKeyboardButton as Btn,
-    InlineKeyboardMarkup,
-    Update,
-    InputFile,
+    InlineKeyboardButton, InlineKeyboardMarkup, Update, InputMediaPhoto
 )
+from telegram.constants import ParseMode
 from telegram.ext import (
-    Application,
-    CallbackQueryHandler,
-    CommandHandler,
-    ConversationHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
+    Application, CallbackQueryHandler, CommandHandler, ConversationHandler,
+    MessageHandler, filters, ContextTypes
 )
-from sqlalchemy import select, func
 
 from database import session_scope, Doubt, DoubtQuota
 
-# ────────────────────────────────────────────────────────────
-# Conversation states
-(CHOOSE_SUBJ, CUSTOM_SUBJ,
- CHOOSE_NAT,  CUSTOM_NAT,
- AWAIT_CONTENT) = range(5)
+# ──────────────────────────────────────────────────────────────
+ADMIN_ID = 803299591          #  ← your Telegram ID
 
-# ────────────────────────────────────────────────────────────
-# Enumerations
+# Conversation states
+SUBJECT, SUBJECT_CUSTOM, NATURE, NATURE_CUSTOM, QUESTION, PUBLICITY = range(6)
+
+# ------------------------------------------------------------------
 class Subject(str, Enum):
-    ENGLISH      = "English & RC"
-    LEGAL        = "Legal Reasoning"
-    LOGICAL      = "Logical Reasoning"
-    MATHS        = "Maths"
-    GK_CA        = "GK / CA"
-    MOCK         = "Mock Test"
-    SECTIONAL    = "Sectional Test"
-    STRATEGY     = "Strategy / Time-Mgmt"
-    APPLICATION  = "Application / College"
-    OTHER        = "Other / Custom"
+    ENGLISH   = "English & RC"
+    LEGAL     = "Legal Reasoning"
+    LOGICAL   = "Logical Reasoning"
+    MATHS     = "Maths"
+    GK_CA     = "GK / CA"
+    MOCK      = "Mock Test"
+    SECTIONAL = "Sectional Test"
+    STRATEGY  = "Strategy / Time-Mgmt"
+    COLLEGE   = "Application / College"
+    OTHER     = "Other / Custom"
 
 class Nature(str, Enum):
-    CANT_SOLVE      = "Can’t solve a question"
-    NO_ANS          = "Don’t understand the official answer"
-    EXPLAIN_WRONG   = "Explain my wrong answer"
-    CONCEPT         = "Concept clarification"
-    ALT_METHOD      = "Need alternative method"
-    SOURCE_REQ      = "Source / reference request"
-    TIME_ADVICE     = "Time-management advice"
-    STRAT_ADVICE    = "Test-taking strategy"
-    OTHER           = "Other / Custom"
+    CANT_SOLVE     = "Can’t solve a question"
+    DONT_UNDERST   = "Don’t understand the official answer"
+    EXPLAIN_WRONG  = "Explain my wrong answer"
+    CONCEPT        = "Concept clarification"
+    ALT_METHOD     = "Need alternative method"
+    SOURCE_REQ     = "Source / reference request"
+    TIME_MGMT      = "Time-management advice"
+    STRATEGY       = "Test-taking strategy"
+    OTHER          = "Other / Custom"
 
-SUBJECT_ORDER = list(Subject)
-NATURE_ORDER  = list(Nature)
+# ------------------------------------------------------------------
+QUOTA_PUBLIC  = 2
+QUOTA_PRIVATE = 3
 
-# ────────────────────────────────────────────────────────────
-#  Helpers
-def _kb_from_enum(enum_list, prefix):
-    """Return inline-keyboard rows of ≤ 2 buttons each."""
-    rows, row = [], []
-    for i, item in enumerate(enum_list, 1):
-        row.append(Btn(item.value, callback_data=f"{prefix}|{item.name}"))
-        if len(row) == 2 or i == len(enum_list):
-            rows.append(row)
-            row = []
-    return InlineKeyboardMarkup(rows)
-
-def _today():
-    return dt.datetime.utcnow()
-
-async def _check_quota(user_id: int) -> Optional[str]:
-    """Return None if okay, else error string."""
-    now  = _today()
-    day_ago = now - dt.timedelta(days=1)
+async def _check_quota(uid: int, want_public: bool) -> str | None:
+    """Return err-msg or None if quota available; also increments counter."""
+    today = dt.date.today()
     with session_scope() as s:
-        quota = s.get(DoubtQuota, user_id) or DoubtQuota(user_id=user_id)
-        # reset window if older than 24 h
-        if quota.last_reset is None or quota.last_reset < day_ago:
-            quota.pub_used = quota.priv_used = 0
-            quota.last_reset = now
-            s.add(quota); s.commit()
-        if quota.pub_used >= quota.pub_limit and quota.priv_used >= quota.priv_limit:
-            return "❌ Daily doubt quota exhausted. Upgrade to submit more."
+        quota = (
+            s.query(DoubtQuota)
+            .filter_by(user_id=uid, date=today)
+            .one_or_none()
+        )
+        if quota is None:
+            quota = DoubtQuota(user_id=uid, date=today)   # counts = 0
+            s.add(quota)
+
+        if want_public and quota.public_count >= QUOTA_PUBLIC:
+            return f"You’ve reached today’s *public* doubt limit ({QUOTA_PUBLIC})."
+        if (not want_public) and quota.private_count >= QUOTA_PRIVATE:
+            return f"You’ve reached today’s *private* doubt limit ({QUOTA_PRIVATE})."
+
+        if want_public:
+            quota.public_count += 1
+        else:
+            quota.private_count += 1
+        s.add(quota)
     return None
 
-# ────────────────────────────────────────────────────────────
-#  Conversation handlers
-async def cmd_doubt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    err = await _check_quota(update.effective_user.id)
-    if err:
-        return await update.message.reply_text(err)
+# ──────────────────────────────────────────────────────────────
+# Helpers to build keyboards
+def _subject_kb() -> InlineKeyboardMarkup:
+    btns = [
+        [InlineKeyboardButton(Subject.ENGLISH,   callback_data=f"s|{Subject.ENGLISH}")],
+        [InlineKeyboardButton(Subject.LEGAL,     callback_data=f"s|{Subject.LEGAL}")],
+        [InlineKeyboardButton(Subject.LOGICAL,   callback_data=f"s|{Subject.LOGICAL}")],
+        [InlineKeyboardButton(Subject.MATHS,     callback_data=f"s|{Subject.MATHS}")],
+        [InlineKeyboardButton(Subject.GK_CA,     callback_data=f"s|{Subject.GK_CA}")],
+        [InlineKeyboardButton(Subject.MOCK,      callback_data=f"s|{Subject.MOCK}")],
+        [InlineKeyboardButton(Subject.SECTIONAL, callback_data=f"s|{Subject.SECTIONAL}")],
+        [InlineKeyboardButton(Subject.STRATEGY,  callback_data=f"s|{Subject.STRATEGY}")],
+        [InlineKeyboardButton(Subject.COLLEGE,   callback_data=f"s|{Subject.COLLEGE}")],
+        [InlineKeyboardButton("Other / Custom ✏️", callback_data=f"s|{Subject.OTHER}")],
+    ]
+    return InlineKeyboardMarkup(btns)
 
-    await update.message.reply_text(
-        "📚 Select *subject* of your doubt:",
-        reply_markup=_kb_from_enum(SUBJECT_ORDER, "S"),
-        parse_mode="Markdown",
-    )
-    return CHOOSE_SUBJ
+def _nature_kb() -> InlineKeyboardMarkup:
+    btns = [
+        [InlineKeyboardButton(Nature.CANT_SOLVE,    callback_data=f"n|{Nature.CANT_SOLVE}")],
+        [InlineKeyboardButton(Nature.DONT_UNDERST,  callback_data=f"n|{Nature.DONT_UNDERST}")],
+        [InlineKeyboardButton(Nature.EXPLAIN_WRONG, callback_data=f"n|{Nature.EXPLAIN_WRONG}")],
+        [InlineKeyboardButton(Nature.CONCEPT,       callback_data=f"n|{Nature.CONCEPT}")],
+        [InlineKeyboardButton(Nature.ALT_METHOD,    callback_data=f"n|{Nature.ALT_METHOD}")],
+        [InlineKeyboardButton(Nature.SOURCE_REQ,    callback_data=f"n|{Nature.SOURCE_REQ}")],
+        [InlineKeyboardButton(Nature.TIME_MGMT,     callback_data=f"n|{Nature.TIME_MGMT}")],
+        [InlineKeyboardButton(Nature.STRATEGY,      callback_data=f"n|{Nature.STRATEGY}")],
+        [InlineKeyboardButton("Other / Custom ✏️",  callback_data=f"n|{Nature.OTHER}")],
+    ]
+    return InlineKeyboardMarkup(btns)
+
+# =================================================================
+# Conversation callbacks
+async def cmd_doubt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Choose a *subject*:", parse_mode="Markdown",
+                                    reply_markup=_subject_kb())
+    return SUBJECT
 
 async def subject_chosen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
-    _, subj_raw = q.data.split("|")
-    if subj_raw == Subject.OTHER.name:
-        await q.edit_message_text("Custom subject (≤ 30 chars):")
-        return CUSTOM_SUBJ
-    ctx.user_data["subject"] = Subject[subj_raw].value
-    await q.edit_message_text(
-        "📌 Select *nature* of the doubt:",
-        reply_markup=_kb_from_enum(NATURE_ORDER, "N"),
-        parse_mode="Markdown",
-    )
-    return CHOOSE_NAT
+    subj = q.data.split("|", 1)[1]
+    if subj == Subject.OTHER:
+        await q.edit_message_text("Enter a short custom *subject* (≤ 30 chars):",
+                                  parse_mode="Markdown")
+        return SUBJECT_CUSTOM
+    ctx.user_data["subject"] = subj
+    await q.edit_message_text("Now pick the *nature* of your doubt:",
+                              parse_mode="Markdown", reply_markup=_nature_kb())
+    return NATURE
 
 async def custom_subject(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["subject"] = update.message.text.strip()[:30]
-    await update.message.reply_text(
-        "📌 Select *nature* of the doubt:",
-        reply_markup=_kb_from_enum(NATURE_ORDER, "N"),
-        parse_mode="Markdown",
-    )
-    return CHOOSE_NAT
+    await update.message.reply_text("Now pick the *nature* of your doubt:",
+                                    parse_mode="Markdown", reply_markup=_nature_kb())
+    return NATURE
 
 async def nature_chosen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
-    _, raw = q.data.split("|")
-    if raw == Nature.OTHER.name:
-        await q.edit_message_text("Custom nature (≤ 30 chars):")
-        return CUSTOM_NAT
-    ctx.user_data["nature"] = Nature[raw].value
-    await q.edit_message_text("✏️ Send your question (text *or* 1 photo):")
-    return AWAIT_CONTENT
+    nat = q.data.split("|", 1)[1]
+    if nat == Nature.OTHER:
+        await q.edit_message_text("Enter a short custom *nature* (≤ 30 chars):",
+                                  parse_mode="Markdown")
+        return NATURE_CUSTOM
+    ctx.user_data["nature"] = nat
+    await q.edit_message_text(
+        "Send your question *text* or *ONE photo* now.",
+        parse_mode="Markdown"
+    )
+    return QUESTION
 
 async def custom_nature(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["nature"] = update.message.text.strip()[:30]
-    await update.message.reply_text("✏️ Send your question (text *or* 1 photo):")
-    return AWAIT_CONTENT
+    await update.message.reply_text(
+        "Send your question *text* or *ONE photo* now.",
+        parse_mode="Markdown"
+    )
+    return QUESTION
 
-async def receive_content(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Accept either text or exactly 1 photo."""
-    uid   = update.effective_user.id
-    cid   = update.effective_chat.id
-    media = None
-    text  = None
-
+async def received_question(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    # store text or photo file_id
     if update.message.photo:
-        media = update.message.photo[-1].file_id
-        caption = update.message.caption or ""
-        text = caption.strip() or None
+        file_id = update.message.photo[-1].file_id
+        ctx.user_data["media_id"] = file_id
+        ctx.user_data["question"] = "[photo]"   # placeholder text
+    elif update.message.text:
+        ctx.user_data["question"] = update.message.text.strip()
+        ctx.user_data["media_id"] = None
     else:
-        text = update.message.text_markdown_urled
+        return await update.message.reply_text("Please send text or ONE photo.")
 
-    if not media and not text:
-        return await update.message.reply_text("❌ Need text or a single photo.")
+    # ask Public / Private
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("Public 👥",  callback_data="pub|yes"),
+         InlineKeyboardButton("Private 🔒", callback_data="pub|no")]
+    ])
+    await update.message.reply_text("How should I answer?", reply_markup=kb)
+    return PUBLICITY
 
-    # check quota again (edge case)
-    err = await _check_quota(uid)
-    if err: return await update.message.reply_text(err)
+async def publicity_chosen(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query; await q.answer()
+    public = q.data.endswith("yes")
+
+    # enforce quota
+    err = await _check_quota(q.from_user.id, public)
+    if err:
+        await q.edit_message_text(err, parse_mode="Markdown")
+        return ConversationHandler.END
 
     # store in DB
     with session_scope() as s:
-        dq = s.get(DoubtQuota, uid)
-        is_public = True   # default for now – you could add /doubt_private later
-        if is_public:
-            dq.pub_used += 1
-        else:
-            dq.priv_used += 1
-        d = Doubt(
-            user_id=uid,
-            created=_today(),
-            subject=ctx.user_data["subject"],
-            nature=ctx.user_data["nature"],
-            text=text,
-            photo_id=media,
-            public=is_public,
+        dbrow = Doubt(
+            user_id   = q.from_user.id,
+            subject   = ctx.user_data["subject"],
+            nature    = ctx.user_data["nature"],
+            question  = ctx.user_data["question"],
+            media_id  = ctx.user_data["media_id"],
+            public    = public,
         )
-        s.add_all([dq, d]); s.commit()
-        doubt_id = d.id
+        s.add(dbrow)
+        s.flush()               # get ID
+        db_id = dbrow.id
 
-    await update.message.reply_text("✅ Doubt received! You’ll get a reply soon.")
-    # notify admin
-    admin_msg = (
-        f"🆕 *Doubt #{doubt_id}*\n"
-        f"👤 {uid}\n"
-        f"🏷 *{d.subject}*  |  *{d.nature}*\n"
-        f"—" * 10
-    )
-    if media:
-        await ctx.bot.send_photo(
-            ctx.bot_data["ADMIN_ID"],
-            media,
-            caption=f"{admin_msg}\n{text or '_no caption_'}",
-            parse_mode="Markdown",
+    # notify user
+    await q.edit_message_text("✅ Your doubt has been sent to the instructor!")
+
+    # forward to ADMIN with inline buttons
+    answer_kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("Answered ✅", callback_data=f"ans|{db_id}|{int(public)}"),
+        InlineKeyboardButton("Private ↩️",  callback_data=f"ans|{db_id}|0"),
+    ]])
+    header = (f"*New doubt #{db_id}*  from [{q.from_user.first_name}](tg://user?id={q.from_user.id})\n"
+              f"*Subject*: {ctx.user_data['subject']}\n"
+              f"*Nature* : {ctx.user_data['nature']}")
+    if ctx.user_data["media_id"]:
+        await q.bot.send_photo(
+            ADMIN_ID, ctx.user_data["media_id"], caption=header,
+            parse_mode="Markdown", reply_markup=answer_kb
         )
     else:
-        await ctx.bot.send_message(
-            ctx.bot_data["ADMIN_ID"],
-            f"{admin_msg}\n{text}",
-            parse_mode="Markdown",
+        await q.bot.send_message(
+            ADMIN_ID, f"{header}\n\n{ctx.user_data['question']}",
+            parse_mode="Markdown", reply_markup=answer_kb
         )
+
     return ConversationHandler.END
 
-async def cancel(update: Update, _: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Cancelled.")
-    return ConversationHandler.END
+# ------------------------------------------------------------------
+async def admin_answer_cb(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Admin pressed 'Answered' / 'Private' – next message he sends becomes the answer."""
+    q = update.callback_query; await q.answer()
+    db_id, want_public = q.data.split("|")[1:]
+    ctx.user_data["ans_for"] = int(db_id)
+    ctx.user_data["ans_public"] = bool(int(want_public))
+    await q.edit_message_text("Send your answer *now* (text or one photo).",
+                              parse_mode="Markdown")
+    return
 
-# ────────────────────────────────────────────────────────────
-def register_handlers(app: Application, admin_id: int):
-    # keep admin_id in bot_data for quick access
-    app.bot_data["ADMIN_ID"] = admin_id
+async def admin_answer_msg(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if "ans_for" not in ctx.user_data:
+        return
+    db_id  = ctx.user_data.pop("ans_for")
+    public = ctx.user_data.pop("ans_public")
 
+    with session_scope() as s:
+        dbrow: Doubt = s.query(Doubt).get(db_id)
+        if not dbrow:
+            return
+        dbrow.answered   = True
+        dbrow.answer_ts  = dt.datetime.utcnow()
+        dbrow.answer_text = "[photo]" if update.message.photo else (update.message.text or "")
+        s.add(dbrow)
+        tgt_user = dbrow.user_id
+
+    # deliver answer
+    if update.message.photo:
+        mid = update.message.photo[-1].file_id
+        if public:
+            sent = await update.message.copy(ADMIN_ID)   # ensure bot has photo
+            await ctx.bot.copy_message(
+                tgt_user, ADMIN_ID, sent.message_id,
+                caption=update.message.caption or "",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            await ctx.bot.send_message(tgt_user, "📝 Your doubt was answered (see above).")
+        else:
+            await ctx.bot.copy_message(
+                tgt_user, ADMIN_ID, update.message.message_id,
+                caption=update.message.caption or "",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            await ctx.bot.send_message(tgt_user, "📝 Your doubt was answered privately.")
+    else:
+        txt = update.message.text or ""
+        if public:
+            await ctx.bot.send_message(tgt_user, f"📝 Answer:\n{txt}")
+        else:
+            await ctx.bot.send_message(tgt_user, f"📝 Private answer:\n{txt}")
+
+# =================================================================
+def register_handlers(app: Application):
     conv = ConversationHandler(
         entry_points=[CommandHandler("doubt", cmd_doubt)],
         states={
-            CHOOSE_SUBJ:  [CallbackQueryHandler(subject_chosen,  pattern=r"^S\|")],
-            CUSTOM_SUBJ:  [MessageHandler(filters.TEXT & ~filters.COMMAND, custom_subject)],
-            CHOOSE_NAT:   [CallbackQueryHandler(nature_chosen,   pattern=r"^N\|")],
-            CUSTOM_NAT:   [MessageHandler(filters.TEXT & ~filters.COMMAND, custom_nature)],
-            AWAIT_CONTENT:[MessageHandler(~filters.COMMAND, receive_content)],
+            SUBJECT:         [CallbackQueryHandler(subject_chosen, pattern=r"^s\|")],
+            SUBJECT_CUSTOM:  [MessageHandler(filters.TEXT & ~filters.COMMAND, custom_subject)],
+            NATURE:          [CallbackQueryHandler(nature_chosen,  pattern=r"^n\|")],
+            NATURE_CUSTOM:   [MessageHandler(filters.TEXT & ~filters.COMMAND, custom_nature)],
+            QUESTION:        [MessageHandler(filters.PHOTO | (filters.TEXT & ~filters.COMMAND),
+                                             received_question)],
+            PUBLICITY:       [CallbackQueryHandler(publicity_chosen, pattern=r"^pub\|")],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[],
         per_chat=True,
     )
     app.add_handler(conv)
+
+    # Admin answer flow
+    app.add_handler(CallbackQueryHandler(admin_answer_cb, pattern=r"^ans\|\d+\|[01]$",
+                                         block=False, chat_id=ADMIN_ID))
+    app.add_handler(MessageHandler(filters.ALL & filters.User(ADMIN_ID), admin_answer_msg))
