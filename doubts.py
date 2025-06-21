@@ -65,16 +65,22 @@ ADMIN_ID = 803299591   # ← your Telegram numeric ID
 
 # ───────────────────────── quota helper ───────────────────────────────────────
 async def _check_quota(uid: int, public: bool) -> Optional[str]:
+    """
+    Returns an error-string if today’s quota is exhausted, else None.
+
+    DoubtQuota has a composite PK (user_id, date) so we must pass BOTH keys
+    to Session.get().
+    """
     today = dt.date.today()
+
     with session_scope() as s:
-        q = s.get(DoubtQuota, uid)
-        if not q:
+        # PK tuple order = (user_id, date)
+        q: DoubtQuota | None = s.get(DoubtQuota, (uid, today))
+
+        if q is None:                          # first doubt today → create row
             q = DoubtQuota(user_id=uid, date=today,
                            public_count=0, private_count=0)
-            s.add(q); s.commit()
-        if q.date != today:                    # new day → reset
-            q.date = today
-            q.public_count = q.private_count = 0
+            s.add(q)
             s.commit()
 
         if public and q.public_count >= 2:
@@ -82,9 +88,13 @@ async def _check_quota(uid: int, public: bool) -> Optional[str]:
         if not public and q.private_count >= 3:
             return "🚫 Daily *private* quota (3) reached – ask again tomorrow."
 
-        if public:   q.public_count   += 1
-        else:        q.private_count += 1
+        # increment
+        if public:
+            q.public_count += 1
+        else:
+            q.private_count += 1
         s.commit()
+
     return None
 
 
