@@ -1,99 +1,44 @@
-# streak.py  ────────────────────────────────────────────────────────────
-"""
-Daily study-streak tracker.
-
-Commands
---------
-/checkin        – record “I studied today!”
-/mystreak       – show consecutive-day streak
-/streak_alerts  – toggle DM alert if the streak breaks
-"""
-
+# streak.py – simple, async loop every hour (no JobQueue)
 import asyncio, datetime as dt
-from typing import Dict
-
-from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update
 
-# ──────────────────────────────────────────────────────────────
-class _Streak:
-    __slots__ = ("days", "last_date", "alerts_on")
+class Streak: __slots__=("days","last","alerts"); 
+streaks={}
 
-    def __init__(self):
-        self.days: int                = 0
-        self.last_date: dt.date | None = None
-        self.alerts_on: bool          = True
+async def checkin(u:Update,_):
+    uid=u.effective_user.id; today=dt.date.today()
+    s=streaks.setdefault(uid,Streak()); 
+    if not hasattr(s,"days"): s.days=0;s.last=None;s.alerts=True
+    if s.last==today: return await u.message.reply_text("Already checked-in!")
+    s.days = s.days+1 if s.last and (today-s.last).days==1 else 1
+    s.last=today
+    await u.message.reply_text(f"🔥 Streak {s.days} day(s)")
 
+async def mystreak(u:Update,_):
+    s=streaks.get(u.effective_user.id)
+    if not s: return await u.message.reply_text("No streak yet.")
+    await u.message.reply_text(f"Current streak: {s.days} days (last {s.last})")
 
-_streaks: Dict[int, _Streak] = {}        # user_id → _Streak
+async def toggle(u:Update,ctx):
+    arg=(ctx.args[0].lower() if ctx.args else "")
+    if arg not in ("on","off"): return await u.message.reply_text("Use on/off")
+    s=streaks.setdefault(u.effective_user.id,Streak()); s.alerts=(arg=="on")
+    await u.message.reply_text(f"Alerts {'ON' if s.alerts else 'OFF'}")
 
-# ──────────────────────────────────────────────────────────────
-async def checkin(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid, today = upd.effective_user.id, dt.date.today()
-    s = _streaks.setdefault(uid, _Streak())
-
-    if s.last_date == today:
-        return await upd.message.reply_text("✅ Already checked-in today!")
-
-    s.days = s.days + 1 if s.last_date and (today - s.last_date).days == 1 else 1
-    s.last_date = today
-
-    await upd.message.reply_text(
-        f"📅 Check-in recorded! 🔥 Current streak: *{s.days}* day(s).",
-        parse_mode="Markdown",
-    )
-
-
-async def mystreak(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    s = _streaks.get(upd.effective_user.id)
-    if not s or not s.last_date:
-        return await upd.message.reply_text("No streak yet. Use /checkin!")
-
-    await upd.message.reply_text(
-        f"🔥 You’re on a *{s.days}-day* streak (last: {s.last_date}).",
-        parse_mode="Markdown",
-    )
-
-
-async def streak_alerts(upd: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ctx.args or ctx.args[0].lower() not in ("on", "off"):
-        return await upd.message.reply_text("Usage: /streak_alerts on|off")
-
-    uid, toggle = upd.effective_user.id, ctx.args[0].lower() == "on"
-    _streaks.setdefault(uid, _Streak()).alerts_on = toggle
-
-    await upd.message.reply_text(
-        f"🔔 Break-streak alerts *{'enabled' if toggle else 'disabled'}*.",
-        parse_mode="Markdown",
-    )
-
-# ──────────────────────────────────────────────────────────────
-async def _hourly_loop(bot):
-    """Background task: DM users whose streak broke."""
+async def _hourly(bot):
     while True:
-        today = dt.date.today()
+        today=dt.date.today()
+        for uid,s in streaks.items():
+            if s.alerts and s.last and (today-s.last).days>=2:
+                try: await bot.send_message(uid,"⚠️ You broke your streak.")
+                except: pass
+                s.alerts=False
+        await asyncio.sleep(3600)
 
-        for uid, s in list(_streaks.items()):
-            if s.alerts_on and s.last_date and (today - s.last_date).days >= 2:
-                try:
-                    await bot.send_message(
-                        uid,
-                        "⚠️ You missed a day and your streak reset. "
-                        "Jump back in with /checkin!",
-                    )
-                except Exception:
-                    pass            # user may have blocked the bot
-                s.alerts_on = False  # mute further alerts until they re-enable
-
-        await asyncio.sleep(3600)    # run every hour
-
-# ──────────────────────────────────────────────────────────────
-def register_handlers(app: Application) -> None:
-    # command handlers
-    app.add_handler(CommandHandler("checkin",        checkin))
-    app.add_handler(CommandHandler("mystreak",       mystreak))
-    app.add_handler(CommandHandler("streak_alerts",  streak_alerts))
-
-# helper the main module will call after start-up
-async def launch_streak_loop(application: Application) -> None:
-    application.create_task(_hourly_loop(application.bot))
+def register_handlers(app:Application):
+    app.add_handler(CommandHandler("checkin",checkin))
+    app.add_handler(CommandHandler("mystreak",mystreak))
+    app.add_handler(CommandHandler("streak_alerts",toggle))
+    async def _post_init(a): a.create_task(_hourly(a.bot))
+    app.post_init(_post_init)
