@@ -1,43 +1,35 @@
-# models.py  ── replace the whole file
-import datetime as dt
-from sqlalchemy import (
-    Column, Integer, String, Date, DateTime, Boolean, Text, Enum, func
-)
+# models.py
+from sqlalchemy import Column, Integer, String, Date, Text, DateTime, Boolean, UniqueConstraint
 from sqlalchemy.orm import declarative_base
+import datetime as dt
 
 Base = declarative_base()
 
-### ─────────────────────────────────────────────────────────────
+# ───────── doubts ─────────
 class Doubt(Base):
-    __tablename__ = "doubt"
-
+    __tablename__ = "doubts"
     id          = Column(Integer, primary_key=True)
     user_id     = Column(Integer, nullable=False, index=True)
-    ts_created  = Column(DateTime, default=func.now(), nullable=False)
-
-    subject     = Column(String(30),  nullable=False)
-    nature      = Column(String(30),  nullable=False)
-    question    = Column(Text,       nullable=False)
-    media_id    = Column(String(120), nullable=True)
-
-    answered    = Column(Boolean, default=False, nullable=False)
-    answer_ts   = Column(DateTime, nullable=True)
-    public      = Column(Boolean, default=True,  nullable=False)
-    answer_text = Column(Text,    nullable=True)
-    answer_mid  = Column(Integer, nullable=True)   # tg message-id of answer
-
+    subject     = Column(String(40), nullable=False)
+    nature      = Column(String(40), nullable=False)
+    question    = Column(Text,     nullable=False)
+    file_id     = Column(String(120))               # Telegram file-id (photo / doc)
+    is_public   = Column(Boolean, default=False)    # False = DM answer
+    answered    = Column(Boolean, default=False)
+    answer      = Column(Text)
+    answered_at = Column(DateTime)
 
 class DoubtQuota(Base):
     """
-    Daily quota per user.
-    • PK is (user_id, date) so one row per day.
+    Daily quota row – one per user per date.
     """
     __tablename__ = "doubt_quota"
-    user_id       = Column(Integer, primary_key=True)
-    date          = Column(Date,    primary_key=True,
-                            default=dt.date.today, server_default=func.date('now'))
-    public_count  = Column(Integer, nullable=False, default=0)
-    private_count = Column(Integer, nullable=False, default=0)
+    id            = Column(Integer, primary_key=True)
+    user_id       = Column(Integer, nullable=False)
+    date          = Column(Date,    nullable=False)
+    public_count  = Column(Integer, default=0)
+    private_count = Column(Integer, default=0)
 
-### ─────────────────────────────────────────────────────────────
-# (other existing tables, if any, stay unchanged)
+    __table_args__ = (
+        UniqueConstraint("user_id", "date", name="uq_doubtquota_user_date"),
+    )
