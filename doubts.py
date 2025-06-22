@@ -1,260 +1,228 @@
 # doubts.py
 """
-Full ‘Ask-a-Doubt’ module – quota check, subject & nature menus,
-media capture, admin answer flow.
+Student-doubt intake & admin-answer module.
 """
 
-# doubts.py   (top-of-file imports ONLY)
+from __future__ import annotations
 
 import enum, datetime as dt
+from pathlib import Path
+from typing import Final, Optional  # ← added Final
+
 from telegram import (
-    Update, InlineKeyboardButton, InlineKeyboardMarkup,
-    InputMediaPhoto, InputMediaDocument
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+    InputMediaPhoto,
 )
 from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler,
-    MessageHandler, ConversationHandler, filters, ContextTypes
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ConversationHandler,
+    ContextTypes,
+    filters,
 )
+from database import session_scope, Doubt, DoubtQuota
+# -----------------------------------------------------------
 
-from database import session_scope                     # session helper
-from models   import Doubt, DoubtQuota                  # ← import models directly
-...
-# (rest of your latest doubts.py remains exactly as you pasted)
+# ─── Configuration ─────────────────────────────────────────
+MAX_PUB:   Final = 2   # free public answers per user / 24 h
+MAX_PRIV:  Final = 3   # free private answers per user / 24 h
 
-# ───────────── SQLAlchemy models & helpers ─────────────
-from database import session_scope
-from models    import Doubt, DoubtQuota                       # <- models import, NOT database
-
-# ───────────── enums for menu building ─────────────
+# ─── Enums for subject & nature ────────────────────────────
 class Subject(enum.Enum):
-    ENG        = "English & RC"
-    LEGAL      = "Legal Reasoning"
-    LOGICAL    = "Logical Reasoning"
-    MATHS      = "Maths"
-    GK         = "GK / CA"
-    MOCK       = "Mock Test"
-    SECTIONAL  = "Sectional Test"
-    STRAT      = "Strategy / Time-Mgmt"
-    COLLEGE    = "Application / College"
-    OTHER      = "Other / Custom"
+    ENGLISH = "English & RC"
+    LEGAL   = "Legal Reasoning"
+    LOGICAL = "Logical Reasoning"
+    MATHS   = "Maths"
+    GK      = "GK / CA"
+    MOCK    = "Mock Test"
+    SECT    = "Sectional Test"
+    STRATEGY= "Strategy / Time-Mgmt"
+    COLLEGE = "Application / College"
+    OTHER   = "Other / Custom"
 
 class Nature(enum.Enum):
-    CANT_SOLVE         = "Can’t solve a question"
-    DONT_UNDERSTAND    = "Don’t understand official answer"
-    EXPLAIN_WRONG      = "Explain my wrong answer"
-    CONCEPT            = "Concept clarification"
-    ALT_METHOD         = "Need alternative method"
-    SOURCE_REQUEST     = "Source / reference request"
-    TIME_MGMT          = "Time-management advice"
-    TEST_STRAT         = "Test-taking strategy"
-    OTHER              = "Other / Custom"
+    CANT_SOLVE     = "Can’t solve a question"
+    DONT_GET_ANS   = "Don’t understand the answer"
+    EXPLAIN_WRONG  = "Explain my wrong answer"
+    CLARIFY_CONCEPT= "Concept clarification"
+    ALT_METHOD     = "Need alternative method"
+    SOURCE_REQ     = "Source / reference request"
+    TIME_ADVICE    = "Time-management advice"
+    TEST_STRAT     = "Test-taking strategy"
+    OTHER          = "Other / Custom"
 
-# ───────────── Conversation states ─────────────
-ASK_SUBJ, ASK_CUSTOM_SUBJ, ASK_NATURE, ASK_CUSTOM_NATURE, \
-ASK_TEXT, ASK_PHOTO = range(6)
+# ─── Conversation states ───────────────────────────────────
+(
+    ASK_SUBJ, ASK_CUSTOM_SUBJ,
+    ASK_NATURE, ASK_CUSTOM_NATURE,
+    ASK_TEXT, ASK_MEDIA, CONFIRM,
+) = range(7)
 
-# ───────────── quota limits ─────────────
-MAX_PUB   : Final = 2     # /day
-MAX_PRIV  : Final = 3     # /day
+# ─── Helpers ───────────────────────────────────────────────
+def _today() -> dt.date: return dt.date.today()
 
-# ───────────── internal helpers ─────────────
-async def _check_quota(uid: int, *, public: bool) -> str | None:
-    today = dt.date.today()
+async def _check_quota(uid: int, public: bool) -> Optional[str]:
+    """Return error-text if quota exceeded, else None."""
     with session_scope() as s:
-        q = s.get(DoubtQuota, {"user_id": uid, "date": today})
-        if not q:
-            q = DoubtQuota(user_id=uid, date=today, public_count=0, private_count=0)
-            s.add(q)
+        quota = s.get(DoubtQuota, (uid, _today()))
+        if quota is None:
+            quota = DoubtQuota(user_id=uid, date=_today(),
+                               public_count=0, private_count=0)
+            s.add(quota)
 
-        used = q.public_count if public else q.private_count
-        limit = MAX_PUB      if public else MAX_PRIV
-        if used >= limit:
-            return f"❌ You reached today’s {limit}-{ 'public' if public else 'private'} doubt quota."
-
-        # increment but _don’t_ commit yet – will commit on session exit
-        if public:
-            q.public_count  += 1
-        else:
-            q.private_count += 1
+        if public and quota.public_count >= MAX_PUB:
+            return f"❌ You used your {MAX_PUB} free *public* doubts today."
+        if not public and quota.private_count >= MAX_PRIV:
+            return f"❌ You used your {MAX_PRIV} free *private* doubts today."
     return None
 
-def _kb_from_enum(enum_cls):
-    rows = []
-    cur  = []
-    for i, m in enumerate(enum_cls):
-        cur.append(InlineKeyboardButton(m.value, callback_data=m.name))
-        if len(cur) == 2:
-            rows.append(cur); cur=[]
-    if cur: rows.append(cur)
-    return InlineKeyboardMarkup(rows)
+def _inc_quota(uid: int, public: bool):
+    with session_scope() as s:
+        q = s.get(DoubtQuota, (uid, _today()))
+        if public:  q.public_count  += 1
+        else:       q.private_count += 1
 
-# ───────────── conversation callbacks ─────────────
-async def cmd_doubt(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    err = await _check_quota(u.effective_user.id, public=False)   # private quota check first
-    if err: return await u.message.reply_text(err)
+async def _store_doubt(d: Doubt) -> int:
+    with session_scope() as s:
+        s.add(d)
+        s.flush()
+        return d.id
 
-    await u.message.reply_text("Choose *subject*:", parse_mode="Markdown",
-                               reply_markup=_kb_from_enum(Subject))
+# ─── Command entry - /doubt ────────────────────────────────
+async def cmd_doubt(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    err = await _check_quota(upd.effective_user.id, public=False)
+    if err:
+        await upd.message.reply_markdown(err + "\nUpgrade plan coming soon 🙂")
+        return ConversationHandler.END
+
+    kb = [
+        [InlineKeyboardButton(v.value, callback_data=f"subj|{v.name}")]
+        for v in Subject if v != Subject.OTHER
+    ] + [[InlineKeyboardButton("Other / Custom", callback_data="subj|OTHER")]]
+    await upd.message.reply_text(
+        "Choose *subject* of your doubt:",
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="Markdown",
+    )
     return ASK_SUBJ
 
-async def subj_chosen(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q  = u.callback_query; await q.answer()
-    key = q.data
-    if key == Subject.OTHER.name:
-        await q.edit_message_text("Enter custom subject (≤ 30 chars):")
+# Subject chosen
+async def subj_chosen(q: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    await q.callback_query.answer()
+    key = q.callback_query.data.split("|",1)[1]
+    if key == "OTHER":
+        await q.callback_query.edit_message_text("Type custom subject (≤ 30 chars):")
         return ASK_CUSTOM_SUBJ
-    ctx.user_data["subject"] = Subject[key].value
-    await q.edit_message_text("Nature of doubt:",
-                              reply_markup=_kb_from_enum(Nature))
+    ctx.user_data["subj"] = Subject[key].value
+    return await _ask_nature(q.callback_query)
+
+async def custom_subj(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    ctx.user_data["subj"] = upd.message.text[:30]
+    return await _ask_nature(upd)
+
+async def _ask_nature(sender):
+    kb = [
+        [InlineKeyboardButton(v.value, callback_data=f"nat|{v.name}")]
+        for v in Nature if v != Nature.OTHER
+    ] + [[InlineKeyboardButton("Other / Custom", callback_data="nat|OTHER")]]
+    await sender.edit_message_text(
+        "Specify *nature* of doubt:",
+        reply_markup=InlineKeyboardMarkup(kb),
+        parse_mode="Markdown",
+    )
     return ASK_NATURE
 
-async def custom_subject(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data["subject"] = u.message.text[:30]
-    await u.message.reply_text("Nature of doubt:",
-                               reply_markup=_kb_from_enum(Nature))
-    return ASK_NATURE
-
-async def nature_chosen(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q= u.callback_query; await q.answer()
-    key=q.data
-    if key == Nature.OTHER.name:
-        await q.edit_message_text("Enter custom nature (≤ 30 chars):")
+# Nature chosen
+async def nat_chosen(q: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    await q.callback_query.answer()
+    key = q.callback_query.data.split("|",1)[1]
+    if key == "OTHER":
+        await q.callback_query.edit_message_text("Type custom nature (≤ 40 chars):")
         return ASK_CUSTOM_NATURE
     ctx.user_data["nature"] = Nature[key].value
-    await q.edit_message_text("Send your question as text (or attach ONE photo).")
+    await q.callback_query.edit_message_text("Describe your doubt (text or photo).")
     return ASK_TEXT
 
-async def custom_nature(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data["nature"] = u.message.text[:30]
-    await u.message.reply_text("Send your question as text (or attach ONE photo).")
+async def custom_nature(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    ctx.user_data["nature"] = upd.message.text[:40]
+    await upd.message.reply_text("Describe your doubt (text or photo).")
     return ASK_TEXT
 
-async def text_received(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data["text"] = u.message.text
-    await u.message.reply_text("Now send ONE photo *or* /skip.", parse_mode="Markdown")
-    return ASK_PHOTO
+# Receive text / media
+async def receive_text(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    ctx.user_data["text"] = upd.message.text_markdown_v2 or ""
+    await upd.message.reply_text("You may now *attach one photo* or tap ✓ Done.",
+                                 reply_markup=InlineKeyboardMarkup(
+                                     [[InlineKeyboardButton("✓ Done", callback_data="confirm")]]),
+                                 parse_mode="Markdown")
+    return ASK_MEDIA
 
-async def photo_received(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    ctx.user_data["photo_file_id"] = u.message.photo[-1].file_id
-    return await _store_and_notify(u, ctx)
+async def receive_photo(upd: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    ctx.user_data["photo"] = upd.message.photo[-1].file_id
+    await upd.message.reply_text("Photo received.\nTap ✓ Done.",
+                                 reply_markup=InlineKeyboardMarkup(
+                                     [[InlineKeyboardButton("✓ Done", callback_data="confirm")]]))
+    return ASK_MEDIA
 
-async def skip_photo(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    return await _store_and_notify(u, ctx)
+async def confirm(q: Update, ctx: ContextTypes.DEFAULT_TYPE) -> int:
+    await q.callback_query.answer()
+    data   = ctx.user_data
+    doubt  = Doubt(
+        user_id=q.from_user.id,
+        subject=data["subj"],
+        nature=data["nature"],
+        text=data.get("text",""),
+        photo_file_id=data.get("photo"),
+        is_public=False,
+        created_at=dt.datetime.utcnow()
+    )
+    did = await _store_doubt(doubt)
+    _inc_quota(q.from_user.id, public=False)
 
-async def _store_and_notify(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    data = ctx.user_data
-    with session_scope() as s:
-        doubt = Doubt(
-            user_id = u.effective_user.id,
-            subject = data["subject"],
-            nature  = data["nature"],
-            text    = data.get("text"),
-            photo_file_id = data.get("photo_file_id"),
-            is_public     = False
+    await q.callback_query.edit_message_text(
+        f"✅ Doubt saved (ID #{did}). You’ll receive a reply soon!"
+    )
+    # notify admin
+    await ctx.application.bot.send_message(
+        chat_id=ctx.bot_data["ADMIN_ID"],
+        text=(
+            f"🆕 *Private doubt* #{did} from [{q.from_user.first_name}](tg://user?id={q.from_user.id})\n"
+            f"*Subject:* {doubt.subject}\n*Nature:* {doubt.nature}\n"
+            f"{doubt.text or '_no text_'}"
+        ),
+        parse_mode="Markdown",
+    )
+    if doubt.photo_file_id:
+        await ctx.application.bot.send_photo(
+            chat_id=ctx.bot_data["ADMIN_ID"],
+            photo=doubt.photo_file_id,
+            caption=f"(photo for doubt #{did})"
         )
-        s.add(doubt)
-        s.flush()          # so we get the id
-
-        # inform student
-        await u.message.reply_text("✅ Doubt submitted! You’ll receive an answer soon.")
-
-        # DM admin
-        admin_msg = textwrap.dedent(f"""
-            📥 *New doubt #{doubt.id}*  
-            👤 `{u.effective_user.id}` – {u.effective_user.full_name}
-            🗂 *{doubt.subject}*  |  _{doubt.nature}_
-            💬 {doubt.text or '_<photo only>_'}
-        """)
-        if doubt.photo_file_id:
-            await ctx.bot.send_photo(
-                chat_id=ctx.bot_data["ADMIN_ID"],
-                photo=doubt.photo_file_id,
-                caption=admin_msg,
-                parse_mode="Markdown",
-                reply_markup=_answer_kb(doubt.id)
-            )
-        else:
-            await ctx.bot.send_message(
-                chat_id=ctx.bot_data["ADMIN_ID"],
-                text=admin_msg,
-                parse_mode="Markdown",
-                reply_markup=_answer_kb(doubt.id)
-            )
+    ctx.user_data.clear()
     return ConversationHandler.END
 
-def _answer_kb(did: int):
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Reply Privately 🗝", callback_data=f"ans|{did}|0"),
-         InlineKeyboardButton("Reply Publicly 📣",  callback_data=f"ans|{did}|1")]
-    ])
-
-# ───────────── admin answer flow ─────────────
-async def admin_answer_cb(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q=u.callback_query; await q.answer()
-    did, pub = map(int, q.data.split("|")[1:])
-    ctx.user_data["did"] = did
-    ctx.user_data["is_public"] = bool(pub)
-    await q.edit_message_text("Send answer (text or photo).")
-    return ASK_TEXT
-
-async def admin_answer_media(u: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    did      : int  = ctx.user_data["did"]
-    is_pub   : bool = ctx.user_data["is_public"]
-    text = u.message.caption or u.message.text
-    photo_id = u.message.photo[-1].file_id if u.message.photo else None
-
-    with session_scope() as s:
-        d: Doubt = s.get(Doubt, did)
-        if not d: return await u.message.reply_text("⛔ Doubt not found.")
-        d.answer_text  = text
-        d.answer_photo = photo_id
-        d.answered_at  = dt.datetime.utcnow()
-        d.is_public    = is_pub
-
-    # send to student
-    dest = d.user_id if not is_pub else ctx.bot_data["GROUP_ID"]
-    if d.answer_photo:
-        await ctx.bot.send_photo(dest, d.answer_photo, caption=text)
-    else:
-        await ctx.bot.send_message(dest, text)
-
-    await u.message.reply_text("✅ Sent.")
-    return ConversationHandler.END
-
-# ───────────── registration ─────────────
+# ─── Registration helper ───────────────────────────────────
 def register_handlers(app: Application):
-    # store admin/group ids for callbacks
-    app.bot_data["ADMIN_ID"] = int(os.getenv("ADMIN_ID", "803299591"))
-    app.bot_data["GROUP_ID"] = int(os.getenv("GROUP_ID", "0"))       # 0 ⇒ skip posting
+    app.bot_data["ADMIN_ID"] = int(app.bot_data.get("ADMIN_ID", 0))  # ensure present
 
     conv = ConversationHandler(
         entry_points=[CommandHandler("doubt", cmd_doubt)],
         states={
-            ASK_SUBJ:          [CallbackQueryHandler(subj_chosen)],
-            ASK_CUSTOM_SUBJ:   [MessageHandler(filters.TEXT & ~filters.COMMAND, custom_subject)],
-            ASK_NATURE:        [CallbackQueryHandler(nature_chosen)],
-            ASK_CUSTOM_NATURE: [MessageHandler(filters.TEXT & ~filters.COMMAND, custom_nature)],
-            ASK_TEXT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, text_received),
-                MessageHandler(filters.PHOTO, photo_received)
-            ],
-            ASK_PHOTO: [
-                MessageHandler(filters.PHOTO, photo_received),
-                CommandHandler("skip", skip_photo)
-            ],
+            ASK_SUBJ:         [CallbackQueryHandler(subj_chosen,  pattern=r"^subj\|")],
+            ASK_CUSTOM_SUBJ:  [MessageHandler(filters.TEXT & ~filters.COMMAND, custom_subj)],
+            ASK_NATURE:       [CallbackQueryHandler(nat_chosen,   pattern=r"^nat\|")],
+            ASK_CUSTOM_NATURE:[MessageHandler(filters.TEXT & ~filters.COMMAND, custom_nature)],
+            ASK_TEXT:         [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_text),
+                               MessageHandler(filters.PHOTO, receive_photo)],
+            ASK_MEDIA:        [CallbackQueryHandler(confirm, pattern="^confirm$"),
+                               MessageHandler(filters.PHOTO, receive_photo)],
         },
-        fallbacks=[CommandHandler("cancel", skip_photo)],
-        per_chat=True,
+        fallbacks=[CommandHandler("cancel", lambda u,c: ConversationHandler.END)],
+        per_user=True,
+        allow_reentry=True,
     )
     app.add_handler(conv)
-
-    # admin answer conversation
-    ans_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(admin_answer_cb, pattern=r"^ans\|\d+\|[01]$")],
-        states={
-            ASK_TEXT: [MessageHandler(filters.TEXT | filters.PHOTO, admin_answer_media)],
-        },
-        fallbacks=[CommandHandler("cancel", skip_photo)],
-        per_chat=False,
-    )
-    app.add_handler(ans_conv)
