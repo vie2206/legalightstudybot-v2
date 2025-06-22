@@ -1,42 +1,35 @@
 # models.py
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, Integer, Date, DateTime, Text, Boolean
 import datetime as dt
+from sqlalchemy import (
+    Column,
+    Integer,
+    String,
+    Text,
+    Date,
+    DateTime,
+    Boolean,
+)
+from sqlalchemy.orm import declarative_base
 
+Base = declarative_base()
 
-class Base(DeclarativeBase):
-    pass
-
-
-# ────────────────────────────────────────────
 class Doubt(Base):
     __tablename__ = "doubt"
-
-    id:            Mapped[int]      = mapped_column(Integer, primary_key=True)
-    user_id:       Mapped[int]      = mapped_column(Integer, index=True, nullable=False)
-    subject:       Mapped[str]      = mapped_column(String(30),  nullable=False)   # e.g. “ENGLISH”
-    nature:        Mapped[str]      = mapped_column(String(30),  nullable=False)   # e.g. “CANT_SOLVE”
-    text:          Mapped[str]      = mapped_column(Text,        nullable=True)    # user’s question text
-    photo_file_id: Mapped[str]      = mapped_column(String(120), nullable=True)    # Telegram file-id
-    is_public:     Mapped[bool]     = mapped_column(Boolean,     nullable=False)
-    created_at:    Mapped[dt.datetime] = mapped_column(
-        DateTime, default=dt.datetime.utcnow, nullable=False
-    )
-
-    # admin reply
-    answer_text:   Mapped[str]      = mapped_column(Text,        nullable=True)
-    answer_photo_file_id: Mapped[str] = mapped_column(String(120), nullable=True)
-    answered_at:   Mapped[dt.datetime] = mapped_column(DateTime, nullable=True)
-
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, index=True, nullable=False)
+    subject = Column(String(50), nullable=False)
+    nature = Column(String(50), nullable=False)
+    label = Column(String(100), nullable=False)    # custom text if “Other”
+    content = Column(Text, nullable=False)         # the student’s question
+    timestamp = Column(DateTime, default=dt.datetime.utcnow, nullable=False)
+    is_public = Column(Boolean, default=False, nullable=False)
+    resolved = Column(Boolean, default=False, nullable=False)
 
 class DoubtQuota(Base):
-    """
-    Composite PK: (user_id, date)
-    Daily counters for public/private submissions.
-    """
     __tablename__ = "doubt_quota"
-
-    user_id:       Mapped[int]   = mapped_column(Integer, primary_key=True)
-    date:          Mapped[dt.date] = mapped_column(Date,    primary_key=True)
-    public_count:  Mapped[int]   = mapped_column(Integer,  default=0, nullable=False)
-    private_count: Mapped[int]   = mapped_column(Integer,  default=0, nullable=False)
+    # Composite PK on (user_id, date)
+    user_id = Column(Integer, primary_key=True, nullable=False)
+    date = Column(Date, primary_key=True, nullable=False)
+    public_count = Column(Integer, default=0, nullable=False)
+    private_count = Column(Integer, default=0, nullable=False)
+    last_reset = Column(DateTime, default=dt.datetime.utcnow, nullable=False)
