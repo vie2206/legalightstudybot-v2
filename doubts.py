@@ -4,18 +4,22 @@ Full ‘Ask-a-Doubt’ module – quota check, subject & nature menus,
 media capture, admin answer flow.
 """
 
-import asyncio, enum, datetime as dt, textwrap
-from pathlib import Path
-from typing import Final
+# doubts.py   (top-of-file imports ONLY)
 
+import enum, datetime as dt
 from telegram import (
-    InlineKeyboardButton, InlineKeyboardMarkup, Update,
-    InputFile
+    Update, InlineKeyboardButton, InlineKeyboardMarkup,
+    InputMediaPhoto, InputMediaDocument
 )
 from telegram.ext import (
-    Application, CommandHandler, MessageHandler, CallbackQueryHandler,
-    ConversationHandler, ContextTypes, filters
+    Application, CommandHandler, CallbackQueryHandler,
+    MessageHandler, ConversationHandler, filters, ContextTypes
 )
+
+from database import session_scope                     # session helper
+from models   import Doubt, DoubtQuota                  # ← import models directly
+...
+# (rest of your latest doubts.py remains exactly as you pasted)
 
 # ───────────── SQLAlchemy models & helpers ─────────────
 from database import session_scope
