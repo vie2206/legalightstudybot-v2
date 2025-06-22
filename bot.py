@@ -96,7 +96,7 @@ def build_app() -> Application:
     countdown.register_handlers(app)
     streak.register_handlers(app)          # starts hourly checker via job-queue
     study_tasks.register_handlers(app)
-    doubts.register_handlers(app, ADMIN_ID)   # ← pass admin id here
+    doubts.register_handlers(app, 803299591)   # ← pass admin id here
 
     # unknown command fallback
     unknown_filter = filters.COMMAND & (~filters.Regex(rf"^/({'|'.join(KNOWN_CMDS)})"))
